@@ -10,7 +10,9 @@ import requests
 import torch.nn as nn
 import random
 
-# Define AestheticPredictor class (same as in the original code)
+# AestheticPredictorクラスの定義
+# このクラスは、画像の美的評価を予測するためのニューラルネットワークモデルを表します
+
 class AestheticPredictor(nn.Module):
     def __init__(self, input_size):
         super().__init__()
@@ -46,6 +48,14 @@ predictor.eval()
 
 clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
 
+
+# Global variables to keep track of the current state
+current_showing_index = -1 # 現在表示している画像のインデックス
+is_running = False # 評価中かどうか
+all_processed_images = [] # すべての処理済みの画像
+images_in_folder = []
+last_processed_folder = ""
+
 def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
     image = preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
@@ -59,34 +69,49 @@ def get_score(image):
     score = predictor(torch.from_numpy(image_features).to(device).float())
     return score.item()
 
-def process_images(folder_path, threshold, progress=gr.Progress()):
-    images = []
+def find_files_in_folder(folder_path):
+    current_images = []
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             if file.lower().endswith(('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')):
-                images.append(os.path.join(root, file))
+                current_images.append(os.path.join(root, file))
+    return current_images
 
-    print(f"{len(images)} images found in {folder_path}")
+def process_images(folder_path, threshold):
+    global current_showing_index, is_running, all_processed_images, images_in_folder, last_processed_folder
     
-    random.shuffle(images)
+    if folder_path != last_processed_folder or not images_in_folder:
+        images_in_folder = find_files_in_folder(folder_path)
+        last_processed_folder = folder_path
+        print(f"{len(images_in_folder)}枚の画像が{folder_path}で見つかりました")
+    
+    random.shuffle(images_in_folder)
+    # 100個サンプル
+    current_images = images_in_folder[:100]
 
-    count = 0
-    for image_path in images:
-        if count >= 100:
-            break
+    current_showing_index = 0
+    is_running = True
+    for image_path in current_images:
         try:
             with Image.open(image_path) as img:
                 print(f"Processing {image_path}")
                 score = get_score(img)
                 print(f"{image_path}: {score:.2f}")
+                all_processed_images.append((image_path, score))
+                current_showing_index = len(all_processed_images) - 1 # show last image
                 yield image_path, score
-                count += 1
+
+                if score >= threshold:
+                    is_running = False
+                    break
         except Exception as e:
             print(f"Error processing {image_path}: {str(e)}")
 
 def gradio_interface(folder_path, threshold):
+    global is_running
+    
     if not os.path.isdir(folder_path):
-        yield gr.update(value="指定されたフォルダが存在しません。"), gr.update(), gr.update(), gr.update(), gr.update(interactive=False)
+        yield gr.update(value="指定されたフォルダが存在しません。"), gr.update(), gr.update(), gr.update()
         return
 
     image_generator = process_images(folder_path, threshold)
@@ -97,8 +122,7 @@ def gradio_interface(folder_path, threshold):
                 image_path,
                 image_path,
                 f"{score:.2f}",
-                f"閾値以上のスコアの画像が見つかりました: {image_path}",
-                gr.update(interactive=True)
+                f"閾値以上のスコアの画像が見つかりました: {image_path}"
             )
             return
         else:
@@ -106,16 +130,14 @@ def gradio_interface(folder_path, threshold):
                 image_path,
                 image_path,
                 f"{score:.2f}",
-                f"評価中: {image_path} (スコア: {score:.2f})",
-                gr.update(interactive=False)
+                f"評価中: {image_path} (スコア: {score:.2f})"
             )
 
     yield (
         gr.update(),
         gr.update(),
         gr.update(),
-        "評価が完了しました。閾値以上のスコアの画像が見つかりませんでした。",
-        gr.update(interactive=False)
+        "評価が完了しました。閾値以上のスコアの画像が見つかりませんでした。"
     )
 
 def copy_image(image_path):
@@ -127,35 +149,75 @@ def copy_image(image_path):
         return f"画像を'good'フォルダにコピーしました: {dest_path}"
     return "画像がありません。"
 
+def stop_evaluation():
+    global is_running
+    is_running = False
+    return "評価を停止しました。"
+
+def previous_image():
+    global current_showing_index
+    if current_showing_index > 0:
+        current_showing_index -= 1
+        image_path, score = all_processed_images[current_showing_index]
+        return image_path, image_path, f"{score:.2f}", f"前の画像: {image_path}"
+    return gr.update(), gr.update(), gr.update(), "これ以上前の画像はありません。"
+
+def next_image():
+    global current_showing_index
+    if current_showing_index < len(all_processed_images) - 1:
+        current_showing_index += 1
+        image_path, score = all_processed_images[current_showing_index]
+        return image_path, image_path, f"{score:.2f}", f"次の画像: {image_path}"
+    return gr.update(), gr.update(), gr.update(), "これ以上次の画像はありません。"
+
 # Gradio インターフェース
 with gr.Blocks() as demo:
-    gr.Markdown("# 美的画像セレクター")
+    # gr.Markdown("# 美的画像セレクター")
     with gr.Row():
         folder_path = gr.Textbox(label="フォルダパス", value="/mnt/d/photo/camera/2024", placeholder="画像フォルダのパスを入力してください")
-        threshold = gr.Slider(minimum=0, maximum=10, value=5, label="閾値")
-    start_button = gr.Button("評価開始")
-    good_button = gr.Button("良い", interactive=False)
+        threshold = gr.Slider(minimum=4, maximum=6, value=5, label="閾値")
+    
+    with gr.Row():
+        start_button = gr.Button("評価開始")
+        stop_button = gr.Button("評価停止")
+        previous_button = gr.Button("前の画像")
+        next_button = gr.Button("次の画像")
+        good_button = gr.Button("保存")
     
     current_image_path = gr.Textbox(visible=False)
 
     with gr.Column():
-        image = gr.Image(label="現在の画像", interactive=False)
+        image = gr.Image(label="現在の画像", interactive=False, height=1000)
         score = gr.Textbox(label="美的スコア")
         status = gr.Textbox(label="ステータス")
     
-
     output = gr.Textbox(label="アクション結果")
-    
+
     start_button.click(
         gradio_interface,
         inputs=[folder_path, threshold],
-        outputs=[image, current_image_path, score, status, good_button]
+        outputs=[image, current_image_path, score, status]
     )
     
     good_button.click(
         copy_image,
         inputs=[current_image_path],
         outputs=[output]
+    )
+
+    stop_button.click(
+        stop_evaluation,
+        outputs=[status]
+    )
+
+    previous_button.click(
+        previous_image,
+        outputs=[image, current_image_path, score, status]
+    )
+
+    next_button.click(
+        next_image,
+        outputs=[image, current_image_path, score, status]
     )
 
 demo.queue().launch()
