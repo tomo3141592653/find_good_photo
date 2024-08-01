@@ -9,6 +9,7 @@ from pathlib import Path
 import requests
 import torch.nn as nn
 import random
+import rawpy
 
 # AestheticPredictorクラスの定義
 # このクラスは、画像の美的評価を予測するためのニューラルネットワークモデルを表します
@@ -64,7 +65,61 @@ def get_image_features(image, device=device, model=clip_model, preprocess=clip_p
     image_features = image_features.cpu().detach().numpy()
     return image_features
 
+def rotate_by_exif(image):
+    try:
+        exif = image._getexif()
+        if exif:
+            orientation = exif.get(0x0112)
+            if orientation == 3:
+                image = image.rotate(180)
+            elif orientation == 6:
+                image = image.rotate(270, expand=True)
+            elif orientation == 8:
+                image = image.rotate(90, expand=True)
+    except Exception as e:
+        print(f"画像の回転中にエラーが発生しました: {str(e)}")
+    return image
+
+
+def get_image(image_path:str):
+    """
+   
+    指定された画像パスから画像を読み込む関数。
+
+    Args:
+        image_path (str): 画像ファイルへのパス。
+
+    Returns:
+        PIL.Image.Image: 読み込まれた画像オブジェクト。
+
+    Note:
+        - JPG、JPEG、PNG形式の画像ファイルを直接開きます。
+        - ARWまたはNEF形式（RAWファイル）の場合：
+          - 同名のJPGファイルが存在すれば、それを優先して開きます。
+          - JPGが見つからない場合、RAWファイルを直接処理します。
+    """
+    if image_path.lower().endswith(('.arw', '.nef')):
+        # JPG版を探す
+        jpg_path = os.path.splitext(image_path)[0] + '.JPG'
+        if os.path.exists(jpg_path):
+            image = Image.open(jpg_path)
+            # rotate by exif
+            image = rotate_by_exif(image)
+            image.thumbnail((1000,1000),Image.LANCZOS)
+        else:
+            # RAWファイルを直接開いて処理
+            with rawpy.imread(image_path) as raw:
+                rgb = raw.postprocess(use_camera_wb=True,half_size=True)
+            image = Image.fromarray(rgb)
+            image.thumbnail((1000,1000),Image.LANCZOS)
+    else:
+        image = Image.open(image_path)
+        image = rotate_by_exif(image)
+        image.thumbnail((1000,1000),Image.LANCZOS)
+    return image
+
 def get_score(image):
+
     image_features = get_image_features(image)
     score = predictor(torch.from_numpy(image_features).to(device).float())
     return score.item()
@@ -73,7 +128,7 @@ def find_files_in_folder(folder_path):
     current_images = []
     for root, dirs, files in os.walk(folder_path):
         for file in files:
-            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG')):
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.arw','.nef')):
                 current_images.append(os.path.join(root, file))
     return current_images
 
@@ -90,25 +145,27 @@ def process_images(folder_path, threshold):
     current_images = images_in_folder[:100]
 
     current_showing_index = 0
-    is_running = True
+
     for image_path in current_images:
         try:
-            with Image.open(image_path) as img:
-                print(f"Processing {image_path}")
-                score = get_score(img)
-                print(f"{image_path}: {score:.2f}")
-                all_processed_images.append((image_path, score))
-                current_showing_index = len(all_processed_images) - 1 # show last image
-                yield image_path, score
+       
+            print(f"Processing {image_path}")
+            image = get_image(image_path)
+            score = get_score(image)
+            print(f"{image_path}: {score:.2f}")
+            all_processed_images.append((image_path, score))
+            current_showing_index = len(all_processed_images) - 1 # show last image
+            yield image_path, image, score
 
-                if score >= threshold:
-                    is_running = False
-                    break
+            if score >= threshold or not is_running:
+                is_running = False
+                break
         except Exception as e:
             print(f"Error processing {image_path}: {str(e)}")
 
 def gradio_interface(folder_path, threshold):
     global is_running
+    is_running = True
     
     if not os.path.isdir(folder_path):
         yield gr.update(value="指定されたフォルダが存在しません。"), gr.update(), gr.update(), gr.update()
@@ -116,10 +173,12 @@ def gradio_interface(folder_path, threshold):
 
     image_generator = process_images(folder_path, threshold)
     
-    for image_path, score in image_generator:
+    for image_path, image, score in image_generator:
+        if not is_running:
+            break
         if score >= threshold:
             yield (
-                image_path,
+                image,
                 image_path,
                 f"{score:.2f}",
                 f"閾値以上のスコアの画像が見つかりました: {image_path}"
@@ -127,7 +186,7 @@ def gradio_interface(folder_path, threshold):
             return
         else:
             yield (
-                image_path,
+                image,
                 image_path,
                 f"{score:.2f}",
                 f"評価中: {image_path} (スコア: {score:.2f})"
@@ -144,8 +203,18 @@ def copy_image(image_path):
     if image_path:
         good_folder = "good"
         os.makedirs(good_folder, exist_ok=True)
-        dest_path = os.path.join(good_folder, os.path.basename(image_path))
-        shutil.copy(image_path, dest_path)
+
+        # もし同名のrawファイルがあればそれをコピーする｡なければそのまま
+        raw_suffix = [".NEF",".ARW"]
+        original_path = image_path
+        for suffix in raw_suffix:
+            raw_path = os.path.splitext(image_path)[0] + suffix
+            if os.path.exists(raw_path):
+                original_path = raw_path
+                break
+        
+        dest_path = os.path.join(good_folder, os.path.basename(original_path))
+        shutil.copy(original_path, dest_path)
         return f"画像を'good'フォルダにコピーしました: {dest_path}"
     return "画像がありません。"
 
@@ -155,19 +224,23 @@ def stop_evaluation():
     return "評価を停止しました。"
 
 def previous_image():
-    global current_showing_index
+    global current_showing_index,is_running
+    is_running = False
     if current_showing_index > 0:
         current_showing_index -= 1
         image_path, score = all_processed_images[current_showing_index]
-        return image_path, image_path, f"{score:.2f}", f"前の画像: {image_path}"
+        image = get_image(image_path)
+        return image, image_path, f"{score:.2f}", f"前の画像: {image_path}"
     return gr.update(), gr.update(), gr.update(), "これ以上前の画像はありません。"
 
 def next_image():
-    global current_showing_index
+    global current_showing_index,is_running
+    is_running = False
     if current_showing_index < len(all_processed_images) - 1:
         current_showing_index += 1
         image_path, score = all_processed_images[current_showing_index]
-        return image_path, image_path, f"{score:.2f}", f"次の画像: {image_path}"
+        image = get_image(image_path)
+        return image, image_path, f"{score:.2f}", f"次の画像: {image_path}"
     return gr.update(), gr.update(), gr.update(), "これ以上次の画像はありません。"
 
 # Gradio インターフェース
