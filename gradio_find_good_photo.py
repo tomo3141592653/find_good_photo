@@ -3,10 +3,10 @@ import random
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Generator, List, Tuple, Optional
+from typing import Generator, List, Tuple
 import hashlib
 import platform
-
+import shlex
 import numpy as np
 from PIL import Image
 import requests
@@ -18,24 +18,14 @@ import gradio as gr
 import pillow_heif
 import rawpy
 
+
+default_folder_name = Path("default_folder_name.txt").read_text().strip()
+
+# AestheticPredictorクラスの定義
+# このクラスは、画像の美的評価を予測するためのニューラルネットワークモデルを表します
+
 class AestheticPredictor(nn.Module):
-    """
-    画像の美的評価を予測するためのニューラルネットワークモデル。
-
-    Attributes:
-        input_size (int): 入力特徴量のサイズ。
-        layers (nn.Sequential): ニューラルネットワークの層構造。
-
-    """
-
-    def __init__(self, input_size: int) -> None:
-        """
-        AestheticPredictorクラスのコンストラクタ。
-
-        Args:
-            input_size (int): 入力特徴量のサイズ。
-
-        """
+    def __init__(self, input_size):
         super().__init__()
         self.input_size = input_size
         self.layers = nn.Sequential(
@@ -49,20 +39,10 @@ class AestheticPredictor(nn.Module):
             nn.Linear(16, 1)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        ニューラルネットワークの順伝播を行う。
-
-        Args:
-            x (torch.Tensor): 入力テンソル。
-
-        Returns:
-            torch.Tensor: 予測結果。
-
-        """
+    def forward(self, x):
         return self.layers(x)
 
-# モデルのダウンロードと読み込み
+# Download and load the model
 state_name = "sac+logos+ava1-l14-linearMSE.pth"
 if not Path(state_name).exists():
     url = f"https://github.com/christophschuhmann/improved-aesthetic-predictor/blob/main/{state_name}?raw=true"
@@ -79,27 +59,15 @@ predictor.eval()
 
 clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
 
-# グローバル変数
-current_showing_index: int = -1  # 現在表示している画像のインデックス
-is_running: bool = False  # 評価中かどうか
-all_processed_images: List[Tuple[str, float]] = []  # すべての処理済みの画像
-images_in_folder: List[str] = []
-last_processed_folder: str = ""
 
-def get_image_features(image: Image.Image, device: torch.device = device, model: torch.nn.Module = clip_model, preprocess: callable = clip_preprocess) -> np.ndarray:
-    """
-    画像の特徴量を抽出する。
+# Global variables to keep track of the current state
+current_showing_index = -1 # 現在表示している画像のインデックス
+is_running = False # 評価中かどうか
+all_processed_images = [] # すべての処理済みの画像
+images_in_folder = []
+last_processed_folder = ""
 
-    Args:
-        image (Image.Image): 入力画像。
-        device (torch.device): 使用するデバイス。
-        model (torch.nn.Module): 特徴量抽出に使用するモデル。
-        preprocess (callable): 前処理関数。
-
-    Returns:
-        np.ndarray: 抽出された特徴量。
-
-    """
+def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
     image = preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
         image_features = model.encode_image(image)
@@ -107,17 +75,7 @@ def get_image_features(image: Image.Image, device: torch.device = device, model:
     image_features = image_features.cpu().detach().numpy()
     return image_features
 
-def rotate_by_exif(image: Image.Image) -> Image.Image:
-    """
-    EXIF情報に基づいて画像を回転させる。
-
-    Args:
-        image (Image.Image): 入力画像。
-
-    Returns:
-        Image.Image: 回転後の画像。
-
-    """
+def rotate_by_exif(image):
     if not hasattr(image, '_getexif'):
         return image
 
@@ -135,17 +93,7 @@ def rotate_by_exif(image: Image.Image) -> Image.Image:
         print(f"画像の回転中にエラーが発生しました: {str(e)}")
     return image
 
-def process_raw_image(image_path: str) -> Image.Image:
-    """
-    RAW画像を処理してPIL画像に変換する。
-
-    Args:
-        image_path (str): RAW画像ファイルのパス。
-
-    Returns:
-        Image.Image: 処理後のPIL画像。
-
-    """
+def process_raw_image(image_path):
     with rawpy.imread(image_path) as raw:
         rgb = raw.postprocess(
             use_camera_wb=True,
@@ -155,15 +103,17 @@ def process_raw_image(image_path: str) -> Image.Image:
         )
     return Image.fromarray(rgb)
 
-def get_image(image_path: str) -> Image.Image:
+
+def get_image(image_path:str):
     """
-    指定された画像パスから画像を読み込む。
+   
+    指定された画像パスから画像を読み込む関数。
 
     Args:
         image_path (str): 画像ファイルへのパス。
 
     Returns:
-        Image.Image: 読み込まれた画像オブジェクト。
+        PIL.Image.Image: 読み込まれた画像オブジェクト。
 
     Note:
         - JPG、JPEG、PNG形式の画像ファイルを直接開きます。
@@ -171,6 +121,7 @@ def get_image(image_path: str) -> Image.Image:
           - 同名のJPGファイルが存在すれば、それを優先して開きます。
           - JPGが見つからない場合、RAWファイルを直接処理します。
     """
+
     if image_path.lower().endswith('.heic'):
         heif_file = pillow_heif.read_heif(image_path)
         image = Image.frombytes(
@@ -181,7 +132,9 @@ def get_image(image_path: str) -> Image.Image:
             heif_file.mode,
             heif_file.stride,
         )
+
     elif image_path.lower().endswith(('.arw', '.nef')):
+        # JPG版を探す
         jpg_path = os.path.splitext(image_path)[0] + '.JPG'
         if os.path.exists(jpg_path):
             image = Image.open(jpg_path)
@@ -191,44 +144,28 @@ def get_image(image_path: str) -> Image.Image:
         image = Image.open(image_path)
 
     image = rotate_by_exif(image)
-    image.thumbnail((1000,1000), Image.LANCZOS)
+    image.thumbnail((1000,1000),Image.LANCZOS)
     return image
 
-def get_score(image: Image.Image) -> float:
-    """
-    画像の美的スコアを計算する。
+def get_score(image):
 
-    Args:
-        image (Image.Image): 入力画像。
-
-    Returns:
-        float: 計算された美的スコア。
-
-    """
     image_features = get_image_features(image)
     score = predictor(torch.from_numpy(image_features).to(device).float())
     return score.item()
 
-def find_files_in_folder(folder_path: str) -> List[str]:
-    """
-    指定されたフォルダ内の画像ファイルを検索する。
-
-    Args:
-        folder_path (str): 検索対象のフォルダパス。
-
-    Returns:
-        List[str]: 見つかった画像ファイルのパスのリスト。
-
-    """
+def find_files_in_folder(folder_path):
     extensions = ('.jpg', '.jpeg', '.png', '.arw', '.nef', '.heic')
     
     if platform.system() == 'Windows':
+        # Windowsの場合
         import glob
         pattern = os.path.join(folder_path, '**', '*.*')
         files = [f for f in glob.glob(pattern, recursive=True) if f.lower().endswith(extensions)]
     else:
-        extensions_regex = '\.jpe?g$|\.png$|\.arw$|\.nef$|\.heic$'
-        command = f"find {folder_path} -type f | grep -E -i '({extensions_regex})'"
+        # Unix系OSの場合
+        extensions_regex = r'\.jpe?g$|\.png$|\.arw$|\.nef$|\.heic$'
+        escaped_folder_path = shlex.quote(folder_path)
+        command = f"find {escaped_folder_path} -type f | grep -E -i '({extensions_regex})'"
         try:
             result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
             files = result.stdout.splitlines()
@@ -239,8 +176,7 @@ def find_files_in_folder(folder_path: str) -> List[str]:
     return files
     
 def update_stack(folder_path: str) -> List[str]:
-    """
-    指定されたフォルダ内の画像ファイルをランダムにサンプリングする。
+    """指定されたフォルダ内の画像ファイルをランダムにサンプリングします。
 
     Args:
         folder_path (str): 画像ファイルを検索するフォルダのパス。
@@ -248,30 +184,39 @@ def update_stack(folder_path: str) -> List[str]:
     Returns:
         List[str]: ランダムにサンプリングされた最大100個の画像ファイルパスのリスト。
 
+    グローバル変数:
+        current_showing_index: 現在表示中の画像のインデックス。
+        is_running: 処理が実行中かどうかを示すフラグ。
+        all_processed_images: 処理済みの全画像情報。
+        images_in_folder: フォルダ内の全画像ファイルパス。
+        last_processed_folder: 最後に処理したフォルダのパス。
     """
     global current_showing_index, is_running, all_processed_images, images_in_folder, last_processed_folder
     
+    # フォルダが変更されたか、画像リストが空の場合、フォルダ内の画像を再取得
     if folder_path != last_processed_folder or not images_in_folder:
         images_in_folder = find_files_in_folder(folder_path)
         last_processed_folder = folder_path
         print(f"{len(images_in_folder)}枚の画像が{folder_path}で見つかりました")
     
+    # 画像リストをランダムにシャッフル
     random.shuffle(images_in_folder)
+    # 最大100個の画像をサンプリング
     current_images = images_in_folder[:100]
     return current_images
 
-def process_images(folder_path: str, threshold: float) -> Generator[Tuple[str, Image.Image, float], None, None]:
-    """
-    指定されたフォルダ内の画像を処理し、閾値以上のスコアを持つ画像を探す。
+
+def process_images(folder_path: str, threshold: float) -> None:
+    """指定されたフォルダ内の画像を処理し、閾値以上のスコアを持つ画像を探します。
 
     Args:
         folder_path (str): 処理する画像が含まれるフォルダのパス。
         threshold (float): 画像を「良い」と判断するスコアの閾値。
 
-    Yields:
-        Tuple[str, Image.Image, float]: 画像パス、画像オブジェクト、スコアのタプル。
-
+    Note:
+        この関数は update_stack と find_good_images を順に呼び出します。
     """
+
     global current_showing_index, is_running, all_processed_images, images_in_folder, last_processed_folder
 
     print(f"処理開始: {folder_path}")
@@ -282,32 +227,25 @@ def process_images(folder_path: str, threshold: float) -> Generator[Tuple[str, I
     for image_path in current_images:
         try:
             print(f"Processing {image_path}")
+            # 画像を読み込み
             image = get_image(image_path)
+            # 画像のスコアを計算
             score = get_score(image)
             print(f"{image_path}: {score:.2f}")
+            # 処理済み画像リストに追加
             all_processed_images.append((image_path, score))
-            current_showing_index = len(all_processed_images) - 1
+            current_showing_index = len(all_processed_images) - 1  # 最後に処理した画像を表示
             yield image_path, image, score
 
+            # 閾値以上のスコアを持つ画像が見つかるか、処理が中断された場合
             if score >= threshold or not is_running:
                 is_running = False
                 break
         except Exception as e:
             print(f"Error processing {image_path}: {str(e)}")
 
-def gradio_interface(folder_path: str, threshold: float) -> Generator[Tuple[Optional[Image.Image], Optional[str], Optional[str], Optional[str]], None, None]:
-    """
-    Gradioインターフェース用の画像処理ジェネレータ。
 
-    Args:
-        folder_path (str): 処理する画像が含まれるフォルダのパス。
-        threshold (float): 画像を「良い」と判断するスコアの閾値。
-
-    Yields:
-        Tuple[Optional[Image.Image], Optional[str], Optional[str], Optional[str]]:
-            画像オブジェクト、画像パス、スコア、ステータスメッセージのタプル。
-
-    """
+def gradio_interface(folder_path, threshold):
     global is_running
     is_running = True
     
@@ -342,37 +280,41 @@ def gradio_interface(folder_path: str, threshold: float) -> Generator[Tuple[Opti
         gr.update(),
         gr.update()
     )
-
 def copy_image(image_path: str) -> str:
     """
-    指定された画像パスの画像を'good'フォルダにコピーする。
+    指定された画像パスの画像を'good'フォルダにコピーする関数。
+
+    RAWファイルが存在する場合は、RAWファイルをコピーします。
+    存在しない場合は、元の画像ファイルをコピーします。
 
     Args:
-        image_path (str): コピーする画像のパス。
+        image_path (str): コピーする画像のパス
 
     Returns:
-        str: コピー操作の結果を示すメッセージ。
+        str: コピー操作の結果を示すメッセージ
 
-    Note:
-        RAWファイルが存在する場合は、RAWファイルをコピーします。
-        存在しない場合は、元の画像ファイルをコピーします。
     """
     if image_path:
+        # 'good'フォルダを作成（既に存在する場合は何もしない）
         good_folder = "good"
         os.makedirs(good_folder, exist_ok=True)
 
+        # RAWファイルの拡張子リスト
         raw_suffix = [".NEF", ".ARW"]
         original_path = image_path
 
+        # RAWファイルが存在するか確認
         for suffix in raw_suffix:
             raw_path = os.path.splitext(image_path)[0] + suffix
             if os.path.exists(raw_path):
                 original_path = raw_path
                 break
         
+        # コピー先のパスを生成
         dest_path = os.path.join(good_folder, os.path.basename(original_path))
 
-        def get_file_hash(file_path: str) -> str:
+
+        def get_file_hash(file_path):
             with open(file_path, "rb") as f:
                 file_hash = hashlib.md5()
                 chunk = f.read(8192)
@@ -394,9 +336,13 @@ def copy_image(image_path: str) -> str:
                 i += 1
             dest_path = f"{base}-{i}{ext}"
             shutil.copy(original_path, dest_path)
+        else:
+            shutil.copy(original_path, dest_path)
 
+        # コピー成功メッセージを返す
         return f"画像を'good'フォルダにコピーしました: {dest_path}"
     
+    # 画像パスが指定されていない場合のエラーメッセージ
     return "画像がありません。"
 
 def stop_evaluation():
@@ -429,7 +375,7 @@ with gr.Blocks() as demo:
     # gr.Markdown("# 美的画像セレクター")
     with gr.Row():
         
-        folder_path = gr.Textbox(label="フォルダパス", value="/mnt/d/photo/camera/2024", placeholder="画像フォルダのパスを入力してください")
+        folder_path = gr.Textbox(label="フォルダパス", value=default_folder_name, placeholder="画像フォルダのパスを入力してください")
         threshold = gr.Slider(minimum=4, maximum=6, value=5, label="閾値")
     
     with gr.Row():
