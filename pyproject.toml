@@ -18,6 +18,7 @@ packaging = "^24.1"
 rawpy = "^0.22.0"
 gradio = "^4.39.0"
 pillow-heif = "^0.18.0"
+scikit-learn = "^1.5.1"
 
 
 [build-system]

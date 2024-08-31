@@ -1,5 +1,4 @@
 # ... 既存のインポート文 ...
-import keyboard
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 import requests
@@ -16,8 +15,14 @@ import os
 from tqdm import tqdm
 import random
 import rawpy
+import datetime
+import random
+random.seed(42)
 
 state_name = "sac+logos+ava1-l14-linearMSE.pth"
+
+all_photo_folder = "/mnt/d/photo/camera/"
+good_photo_folder = "./photos_in_hp"
 
 if not Path(state_name).exists():
     url = f"https://github.com/christophschuhmann/improved-aesthetic-predictor/blob/main/{state_name}?raw=true"
@@ -28,6 +33,7 @@ if not Path(state_name).exists():
 class AestheticPredictor(nn.Module):
     def __init__(self, input_size):
         super().__init__()
+        self.input_size = input_size
         self.layers = nn.Sequential(
             nn.Linear(self.input_size, 1024),
             nn.Dropout(0.2),
@@ -37,13 +43,13 @@ class AestheticPredictor(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(64, 16),
             nn.Linear(16, 1),
-            nn.Sigmoid()  # 確率として出力するためにSigmoid関数を追加
         )
 
     def forward(self, x):
-        return self.layers(x)
+        return torch.sigmoid(self.layers(x)-5)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"device: {device}")
 pt_state = torch.load(state_name)
 predictor = AestheticPredictor(768)
 predictor.load_state_dict(pt_state)
@@ -52,104 +58,177 @@ predictor.eval()
 
 clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
 
+
+def evaluate_model(model, X, y, device):
+    model.eval()
+    with torch.no_grad():
+        X_tensor = torch.from_numpy(np.array(X)).to(device).float()
+        y_tensor = torch.from_numpy(np.array(y)).to(device).float().unsqueeze(1)
+        outputs = model(X_tensor)
+        loss = nn.BCELoss()(outputs, y_tensor)
+    return loss.item()
+
 def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
     image = preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
         image_features = model.encode_image(image)
         image_features /= image_features.norm(dim=-1, keepdim=True)
-    image_features = image_features.cpu().detach().numpy()
-    return image_features
-
-def get_score(image):
-    image_features = get_image_features(image)
-    score = predictor(torch.from_numpy(image_features).to(device).float())
-    return score.item() * 10  # 0-1の確率を0-10のスコアに変換
-
-def show_and_evaluate_image(image_path, score):
-    img = Image.open(image_path)
-    img.thumbnail((800, 800))
-    
-    plt.figure(figsize=(10, 10))
-    plt.imshow(img)
-    plt.axis('off')
-    plt.title(f"Score: {score:.2f}\n{image_path}")
-    plt.show(block=False)
-    
-    while True:
-        if keyboard.is_pressed('right'):
-            plt.close()
-            return True
-        elif keyboard.is_pressed('left'):
-            plt.close()
-            return False
+    return image_features.squeeze(0)  # GPUに保持したまま、1次元テンソルとして返す
 
 def retrain_model(good_images):
-    # 良い画像のデータを準備
+    import time 
+    start_time = time.time()
+    print("データの準備")
+    # データの準備
     X = []
     y = []
     for image_path in good_images:
         img = Image.open(image_path)
         features = get_image_features(img)
-        X.append(features[0])
+        X.append(features.cpu().numpy())  # CPUに移動してからNumPy配列に変換
         y.append(1.0)  # 良い画像は1.0
 
-    # ランダムな画像も追加（悪い例として）
-    random_images = random.sample(glob.glob(f"{folder_path}/**/*.jpg", recursive=True), len(good_images))
-    for image_path in random_images:
-        img = Image.open(image_path)
-        features = get_image_features(img)
-        X.append(features[0])
-        y.append(0.0)  # ランダムな画像は0.0
 
-    X = np.array(X)
-    y = np.array(y)
+    # データを訓練セットと検証セットに分割
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # データを訓練セットとテストセットに分割
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # モデルを再訓練
+    # モデルの再訓練
     predictor.train()
     optimizer = torch.optim.Adam(predictor.parameters(), lr=0.001)
     criterion = nn.BCELoss()
 
-    for epoch in range(100):  # エポック数は調整可能
-        optimizer.zero_grad()
-        outputs = predictor(torch.from_numpy(X_train).to(device).float())
-        loss = criterion(outputs, torch.from_numpy(y_train).to(device).float().unsqueeze(1))
-        loss.backward()
-        optimizer.step()
+    num_epochs = 100
+    batch_size = 32
+    patience = 10  # early stoppingの閾値
+    best_val_loss = float('inf')
+    epochs_without_improvement = 0
+
+    # all_photos = glob.glob(f"{all_photo_folder}/**/*.{{jpg,JPG}}", recursive=True)
+    all_photos = []
+    for ext in ["jpg", "JPG", "jpeg", "JPEG"]:
+        all_photos.extend(glob.glob(f"{all_photo_folder}/**/*.{ext}", recursive=True))
+
+    print(f"{len(all_photos)}枚の画像があります。")
+
+    predictor.to(device)
+
+    print(f"初期処理にかかった時間: {time.time() - start_time}秒")
+    start_time = time.time()
+
+    # 学習前のモデルの評価
+    initial_train_loss = evaluate_model(predictor, X_train, y_train, device)
+    initial_val_loss = evaluate_model(predictor, X_val, y_val, device)
+    print(f"学習前 - 訓練損失: {initial_train_loss:.4f}, 検証損失: {initial_val_loss:.4f}")
+
+    for epoch in tqdm(range(num_epochs), desc="エポック"):
+        X_train_random_sample = random.sample(X_train, 128)
+        y_train_random_sample = [1.0] * len(X_train_random_sample)
+
+        # ネガティブサンプルの追加（エポックごとに変更）
+        start_time = time.time()
+        random_images = random.sample(all_photos, len(X_train_random_sample))
+        X_negative = []
+        y_negative = []
+        for image_path in tqdm(random_images, desc="ネガティブサンプルの特徴抽出", leave=False):
+            try:
+                img = Image.open(image_path)
+                features = get_image_features(img)
+                X_negative.append(features.cpu().numpy())  # CPUに移動してからNumPy配列に変換
+                y_negative.append(0.0)  # ランダムな画像は0.0
+            except:
+                print(f"cannnot open {image_path}, skip")
+        print(f"ネガティブサンプルの特徴抽出にかかった時間: {time.time() - start_time}秒")
+        start_time = time.time()
+
+        X_epoch = np.array(X_train_random_sample + X_negative)
+        y_epoch = np.array(y_train_random_sample + y_negative)
+
+        # データのシャッフル
+        indices = np.arange(len(X_epoch))
+        np.random.shuffle(indices)
+        X_epoch = X_epoch[indices]
+        y_epoch = y_epoch[indices]
+
+        total_loss = 0
+        num_batches = 0
+        for i in range(0, len(X_epoch), batch_size):
+            batch_X = torch.from_numpy(X_epoch[i:i+batch_size]).to(device).float()
+            batch_y = torch.from_numpy(y_epoch[i:i+batch_size]).to(device).float().unsqueeze(1)
+
+            optimizer.zero_grad()
+            outputs = predictor(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            num_batches += 1
+
+        # 検証データでの評価
+        predictor.eval()
+        with torch.no_grad():
+            val_X = torch.from_numpy(np.array(X_val)).to(device).float()
+            val_y = torch.from_numpy(np.array(y_val)).to(device).float().unsqueeze(1)
+            val_outputs = predictor(val_X)
+            val_loss = criterion(val_outputs, val_y)
+
+        predictor.train()
+
+        avg_train_loss = total_loss / num_batches
+        print(f"エポック {epoch+1}/{num_epochs}, 訓練損失: {avg_train_loss:.4f}, 検証損失: {val_loss:.4f}")
+
+       # Early stopping のチェック
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+            # ベストモデルの保存
+            best_model_state = predictor.state_dict().copy()
+            # ベストモデルの保存
+            current_date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            best_model_path = f"best_model_valid_loss_{best_val_loss:.4f}_epoch{epoch+1}.pth"
+            torch.save(predictor.state_dict(), best_model_path)
+            print(f"新しいベストモデルを保存しました: {best_model_path}")
+
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                print(f"Early stopping: {patience} エポック連続で改善が見られませんでした。")
+                break
+
+
+        if torch.cuda.is_available():
+            print(f"GPU使用メモリ: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+
+
 
     predictor.eval()
 
-    # チェックポイントを保存
-    torch.save(predictor.state_dict(), "retrained_model.pth")
+    # ベストモデルの読み込み
+    predictor.load_state_dict(best_model_state)
 
-def find_best_photo(folder_path, sample_num=None, output_dir="output"):
-    os.makedirs(output_dir, exist_ok=True)
-    good_images = []
-    swipe_count = 0
-
-    while True:
-        # ランダムに画像を選択
-        all_images = glob.glob(f"{folder_path}/**/*.jpg", recursive=True)
-        random.shuffle(all_images)
-        
-        for image_path in all_images:
-            img = Image.open(image_path)
-            score = get_score(img)
-            
-            if score > 5:  # スコアが5以上の場合のみ表示
-                is_good = show_and_evaluate_image(image_path, score)
-                if is_good:
-                    good_images.append(image_path)
-                    swipe_count += 1
-                    
-                    if swipe_count == 10:
-                        print("10枚の良い画像が選択されました。モデルを再訓練します。")
-                        retrain_model(good_images)
-                        swipe_count = 0
-                        good_images = []
-                        print("再訓練が完了しました。新しいモデルで続行します。")
-
+    # モデルの保存（日付を含む）
+    current_date = datetime.datetime.now().strftime("%Y%m%d")
+    model_save_path = f"retrained_model_{current_date}.pth"
+    torch.save(predictor.state_dict(), model_save_path)
+    print(f"モデルを保存しました: {model_save_path}")
+# メイン処理
 if __name__ == "__main__":
-    find_best_photo("/mnt/d/photo/camera/2012", output_dir="output/2012")
+
+    print(f"CUDA利用可能: {torch.cuda.is_available()}")
+    print(f"現在のデバイス: {device}")
+    if torch.cuda.is_available():
+        print(f"現在のCUDAデバイス: {torch.cuda.current_device()}")
+        print(f"デバイス名: {torch.cuda.get_device_name(0)}")
+
+    # 初期重みの読み込み
+    predictor.load_state_dict(torch.load("sac+logos+ava1-l14-linearMSE.pth"))
+    predictor.to(device)
+
+    # 良い画像のパスを取得
+    
+
+    good_images = glob.glob(f"{good_photo_folder}/*.jpg")
+    print(f"{len(good_images)}枚の良い画像が選択されました。モデルを再訓練します。")
+
+    # モデルの再訓練
+    retrain_model(good_images)

@@ -42,6 +42,7 @@ class AestheticPredictor(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
+
 # Download and load the model
 state_name = "sac+logos+ava1-l14-linearMSE.pth"
 if not Path(state_name).exists():
@@ -51,6 +52,7 @@ if not Path(state_name).exists():
         f.write(r.content)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"device: {device}")
 pt_state = torch.load(state_name, map_location=device)
 predictor = AestheticPredictor(768)
 predictor.load_state_dict(pt_state)
@@ -116,7 +118,7 @@ def get_image(image_path:str):
         PIL.Image.Image: 読み込まれた画像オブジェクト。
 
     Note:
-        - JPG、JPEG、PNG形式の画像ファイルを直接開きます。
+        - JPG、JPEG、の画像ファイルを直接開きます。
         - ARWまたはNEF形式（RAWファイル）の場合：
           - 同名のJPGファイルが存在すれば、それを優先して開きます。
           - JPGが見つからない場合、RAWファイルを直接処理します。
@@ -154,7 +156,7 @@ def get_score(image):
     return score.item()
 
 def find_files_in_folder(folder_path):
-    extensions = ('.jpg', '.jpeg', '.png', '.arw', '.nef', '.heic')
+    extensions = ('.jpg', '.jpeg', '.arw', '.nef', '.heic')
     
     if platform.system() == 'Windows':
         # Windowsの場合
@@ -163,7 +165,7 @@ def find_files_in_folder(folder_path):
         files = [f for f in glob.glob(pattern, recursive=True) if f.lower().endswith(extensions)]
     else:
         # Unix系OSの場合
-        extensions_regex = r'\.jpe?g$|\.png$|\.arw$|\.nef$|\.heic$'
+        extensions_regex = r'\.jpe?g$|\.arw$|\.nef$|\.heic$'
         escaped_folder_path = shlex.quote(folder_path)
         command = f"find {escaped_folder_path} -type f | grep -E -i '({extensions_regex})'"
         try:
