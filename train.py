@@ -46,7 +46,7 @@ class AestheticPredictor(nn.Module):
         )
 
     def forward(self, x):
-        return torch.sigmoid(self.layers(x)-5)
+        return self.layers(x)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
@@ -65,7 +65,7 @@ def evaluate_model(model, X, y, device):
         X_tensor = torch.from_numpy(np.array(X)).to(device).float()
         y_tensor = torch.from_numpy(np.array(y)).to(device).float().unsqueeze(1)
         outputs = model(X_tensor)
-        loss = nn.BCELoss()(outputs, y_tensor)
+        loss = nn.MSELoss()(outputs, y_tensor)
     return loss.item()
 
 def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
@@ -86,7 +86,7 @@ def retrain_model(good_images):
         img = Image.open(image_path)
         features = get_image_features(img)
         X.append(features.cpu().numpy())  # CPUに移動してからNumPy配列に変換
-        y.append(1.0)  # 良い画像は1.0
+        y.append(6.0)  # 良い画像は1.0
 
 
     # データを訓練セットと検証セットに分割
@@ -95,7 +95,7 @@ def retrain_model(good_images):
     # モデルの再訓練
     predictor.train()
     optimizer = torch.optim.Adam(predictor.parameters(), lr=0.001)
-    criterion = nn.BCELoss()
+    criterion = nn.MSELoss()
 
     num_epochs = 100
     batch_size = 32
@@ -122,7 +122,7 @@ def retrain_model(good_images):
 
     for epoch in tqdm(range(num_epochs), desc="エポック"):
         X_train_random_sample = random.sample(X_train, 128)
-        y_train_random_sample = [1.0] * len(X_train_random_sample)
+        y_train_random_sample = [6.0] * len(X_train_random_sample)
 
         # ネガティブサンプルの追加（エポックごとに変更）
         start_time = time.time()
@@ -134,7 +134,7 @@ def retrain_model(good_images):
                 img = Image.open(image_path)
                 features = get_image_features(img)
                 X_negative.append(features.cpu().numpy())  # CPUに移動してからNumPy配列に変換
-                y_negative.append(0.0)  # ランダムな画像は0.0
+                y_negative.append(4.0)  # ランダムな画像は0.0
             except:
                 print(f"cannnot open {image_path}, skip")
         print(f"ネガティブサンプルの特徴抽出にかかった時間: {time.time() - start_time}秒")

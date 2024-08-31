@@ -40,10 +40,10 @@ class AestheticPredictor(nn.Module):
         )
 
     def forward(self, x):
-        return torch.sigmoid(self.layers(x)-5)*10
+        return self.layers(x)
 
 # Download and load the model
-state_name = "best_model_valid_loss_0.2084_epoch31.pth"
+state_name = "best_model_valid_loss_0.3307_epoch17.pth"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
