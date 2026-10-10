@@ -51,6 +51,8 @@ if not Path(state_name).exists():
     with open(state_name, "wb") as f:
         f.write(r.content)
 
+#state_name = "best_model_valid_loss_0.3307_epoch17.pth"
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
 pt_state = torch.load(state_name, map_location=device)
@@ -63,10 +65,13 @@ clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
 
 
 # Global variables to keep track of the current state
-current_showing_index = -1 # 現在表示している画像のインデックス
-is_running = False # 評価中かどうか
-all_processed_images = [] # すべての処理済みの画像
-images_in_folder = []
+current_showing_index = -1  # images_in_folder内のインデックス
+is_running = False
+scores_cache = {}  # {path: score}
+all_processed_images = []   # [(path, score), ...] スコア計算順
+history_index = -1          # all_processed_images内のインデックス
+images_in_folder = []  # ファイル名順ソート済み
+images_in_folder_index = {}  # {path: index} O(1)検索用
 last_processed_folder = ""
 
 def get_image_features(image, device=device, model=clip_model, preprocess=clip_preprocess):
@@ -178,68 +183,42 @@ def find_files_in_folder(folder_path):
     return files
     
 def update_stack(folder_path: str) -> List[str]:
-    """指定されたフォルダ内の画像ファイルをランダムにサンプリングします。
+    global current_showing_index, is_running, scores_cache, all_processed_images, history_index, images_in_folder, images_in_folder_index, last_processed_folder
 
-    Args:
-        folder_path (str): 画像ファイルを検索するフォルダのパス。
-
-    Returns:
-        List[str]: ランダムにサンプリングされた最大100個の画像ファイルパスのリスト。
-
-    グローバル変数:
-        current_showing_index: 現在表示中の画像のインデックス。
-        is_running: 処理が実行中かどうかを示すフラグ。
-        all_processed_images: 処理済みの全画像情報。
-        images_in_folder: フォルダ内の全画像ファイルパス。
-        last_processed_folder: 最後に処理したフォルダのパス。
-    """
-    global current_showing_index, is_running, all_processed_images, images_in_folder, last_processed_folder
-    
-    # フォルダが変更されたか、画像リストが空の場合、フォルダ内の画像を再取得
     if folder_path != last_processed_folder or not images_in_folder:
-        images_in_folder = find_files_in_folder(folder_path)
+        files = find_files_in_folder(folder_path)
+        files.sort()  # ファイル名順 = 撮影時刻順
+        images_in_folder = files
+        images_in_folder_index = {path: i for i, path in enumerate(files)}
+        scores_cache = {}
+        all_processed_images = []
+        history_index = -1
         last_processed_folder = folder_path
         print(f"{len(images_in_folder)}枚の画像が{folder_path}で見つかりました")
-    
-    # 画像リストをランダムにシャッフル
-    random.shuffle(images_in_folder)
-    # 最大100個の画像をサンプリング
-    current_images = images_in_folder[:100]
-    return current_images
+
+    sample = list(images_in_folder)
+    random.shuffle(sample)
+    return sample[:100]
 
 
 def process_images(folder_path: str, threshold: float) -> None:
-    """指定されたフォルダ内の画像を処理し、閾値以上のスコアを持つ画像を探します。
-
-    Args:
-        folder_path (str): 処理する画像が含まれるフォルダのパス。
-        threshold (float): 画像を「良い」と判断するスコアの閾値。
-
-    Note:
-        この関数は update_stack と find_good_images を順に呼び出します。
-    """
-
-    global current_showing_index, is_running, all_processed_images, images_in_folder, last_processed_folder
+    global current_showing_index, is_running, scores_cache, all_processed_images, history_index, images_in_folder, images_in_folder_index, last_processed_folder
 
     print(f"処理開始: {folder_path}")
     current_images = update_stack(folder_path)
 
-    current_showing_index = 0
-
     for image_path in current_images:
         try:
             print(f"Processing {image_path}")
-            # 画像を読み込み
             image = get_image(image_path)
-            # 画像のスコアを計算
             score = get_score(image)
             print(f"{image_path}: {score:.2f}")
-            # 処理済み画像リストに追加
+            scores_cache[image_path] = score
             all_processed_images.append((image_path, score))
-            current_showing_index = len(all_processed_images) - 1  # 最後に処理した画像を表示
+            history_index = len(all_processed_images) - 1
+            current_showing_index = images_in_folder_index.get(image_path, -1)
             yield image_path, image, score
 
-            # 閾値以上のスコアを持つ画像が見つかるか、処理が中断された場合
             if score >= threshold or not is_running:
                 is_running = False
                 break
@@ -347,45 +326,100 @@ def copy_image(image_path: str) -> str:
     # 画像パスが指定されていない場合のエラーメッセージ
     return "画像がありません。"
 
+def browse_folder():
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = 'フォルダを選択';"
+        "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        capture_output=True, text=True
+    )
+    folder = result.stdout.strip()
+    return folder if folder else gr.update()
+
 def stop_evaluation():
     global is_running
     is_running = False
     return "評価を停止しました。"
 
+def _show_folder_image(index):
+    image_path = images_in_folder[index]
+    image = get_image(image_path)
+    score = scores_cache.get(image_path)
+    if score is None:
+        score = get_score(image)
+        scores_cache[image_path] = score
+    return image, image_path, f"{score:.2f}"
+
 def previous_image():
-    global current_showing_index,is_running
+    global current_showing_index, is_running
     is_running = False
+    if not images_in_folder:
+        return gr.update(), gr.update(), gr.update(), "画像が読み込まれていません。"
     if current_showing_index > 0:
         current_showing_index -= 1
-        image_path, score = all_processed_images[current_showing_index]
-        image = get_image(image_path)
-        return image, image_path, f"{score:.2f}", f"前の画像: {image_path}"
+        image, path, score_str = _show_folder_image(current_showing_index)
+        return image, path, score_str, f"前の写真: {path}"
     return gr.update(), gr.update(), gr.update(), "これ以上前の画像はありません。"
 
 def next_image():
-    global current_showing_index,is_running
+    global current_showing_index, is_running
     is_running = False
-    if current_showing_index < len(all_processed_images) - 1:
+    if not images_in_folder:
+        return gr.update(), gr.update(), gr.update(), "画像が読み込まれていません。"
+    if current_showing_index < len(images_in_folder) - 1:
         current_showing_index += 1
-        image_path, score = all_processed_images[current_showing_index]
-        image = get_image(image_path)
-        return image, image_path, f"{score:.2f}", f"次の画像: {image_path}"
+        image, path, score_str = _show_folder_image(current_showing_index)
+        return image, path, score_str, f"次の写真: {path}"
     return gr.update(), gr.update(), gr.update(), "これ以上次の画像はありません。"
+
+def previous_history():
+    global history_index, current_showing_index, is_running
+    is_running = False
+    if not all_processed_images:
+        return gr.update(), gr.update(), gr.update(), "評価済み画像がありません。"
+    if history_index > 0:
+        history_index -= 1
+        path, score = all_processed_images[history_index]
+        current_showing_index = images_in_folder_index.get(path, current_showing_index)
+        image = get_image(path)
+        return image, path, f"{score:.2f}", f"履歴 ({history_index + 1}/{len(all_processed_images)}): {path}"
+    return gr.update(), gr.update(), gr.update(), "履歴の先頭です。"
+
+def next_history():
+    global history_index, current_showing_index, is_running
+    is_running = False
+    if not all_processed_images:
+        return gr.update(), gr.update(), gr.update(), "評価済み画像がありません。"
+    if history_index < len(all_processed_images) - 1:
+        history_index += 1
+        path, score = all_processed_images[history_index]
+        current_showing_index = images_in_folder_index.get(path, current_showing_index)
+        image = get_image(path)
+        return image, path, f"{score:.2f}", f"履歴 ({history_index + 1}/{len(all_processed_images)}): {path}"
+    return gr.update(), gr.update(), gr.update(), "履歴の末尾です。"
 
 # Gradio インターフェース
 with gr.Blocks() as demo:
     # gr.Markdown("# 美的画像セレクター")
     with gr.Row():
-        
-        folder_path = gr.Textbox(label="フォルダパス", value=default_folder_name, placeholder="画像フォルダのパスを入力してください")
-        threshold = gr.Slider(minimum=4, maximum=6, value=5, label="閾値")
+        with gr.Column(scale=3):
+            folder_path = gr.Textbox(label="フォルダパス", value=default_folder_name, placeholder="画像フォルダのパスを入力してください")
+            browse_button = gr.Button("📁 フォルダ選択", size="sm", elem_id="browse-btn")
+        threshold = gr.Slider(minimum=4, maximum=6, value=5, label="閾値", scale=1)
     
     with gr.Row():
         start_button = gr.Button("評価開始")
         stop_button = gr.Button("評価停止")
-        previous_button = gr.Button("前の画像")
-        next_button = gr.Button("次の画像")
         good_button = gr.Button("保存")
+    with gr.Row():
+        prev_history_button = gr.Button("◀ 履歴")
+        next_history_button = gr.Button("履歴 ▶")
+        previous_button = gr.Button("◀ 前後")
+        next_button = gr.Button("前後 ▶")
     
     current_image_path = gr.Textbox(visible=False)
 
@@ -395,6 +429,11 @@ with gr.Blocks() as demo:
         status = gr.Textbox(label="ステータス")
     
     output = gr.Textbox(label="アクション結果")
+
+    browse_button.click(
+        browse_folder,
+        outputs=[folder_path]
+    )
 
     start_button.click(
         gradio_interface,
@@ -413,6 +452,16 @@ with gr.Blocks() as demo:
         outputs=[status]
     )
 
+    prev_history_button.click(
+        previous_history,
+        outputs=[image, current_image_path, score, status]
+    )
+
+    next_history_button.click(
+        next_history,
+        outputs=[image, current_image_path, score, status]
+    )
+
     previous_button.click(
         previous_image,
         outputs=[image, current_image_path, score, status]
@@ -423,4 +472,4 @@ with gr.Blocks() as demo:
         outputs=[image, current_image_path, score, status]
     )
 
-demo.queue().launch(debug=True)
+demo.queue().launch(debug=True, css="#browse-btn { max-width: 130px; }")

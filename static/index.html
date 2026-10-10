@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>写真評価</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #080808;
+  --s1:       #111;
+  --s2:       #181818;
+  --s3:       #222;
+  --border:   #252525;
+  --border2:  #333;
+  --text:     #d8d8d8;
+  --dim:      #4a4a4a;
+  --dim2:     #666;
+  --accent:   #c97a00;
+  --accent2:  #e8950a;
+  --green:    #27a844;
+  --amber:    #d4860a;
+  --red:      #c0392b;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Helvetica Neue', Arial, system-ui, sans-serif;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Toolbar ───────────────────────────────────────────── */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--s1);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  height: 44px;
+}
+
+#run-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex-shrink: 0;
+  transition: background 0.3s;
+}
+#run-dot.on {
+  background: var(--accent2);
+  animation: blink 1.4s ease-in-out infinite;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+#folder-wrap {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+#folder-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 5px 9px;
+  font-size: 13px;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  outline: none;
+  min-width: 0;
+}
+#folder-input::placeholder { color: var(--dim); }
+#folder-input:focus { outline: none; }
+#folder-wrap:focus-within { border-color: var(--accent); }
+
+#browse-btn {
+  background: var(--s2);
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--dim2);
+  padding: 0 9px;
+  cursor: pointer;
+  font-size: 13px;
+  height: 100%;
+  transition: color .15s, background .15s;
+}
+#browse-btn:hover { color: var(--text); background: var(--s3); }
+
+.sep { width: 1px; height: 18px; background: var(--border); flex-shrink: 0; }
+
+.tl { color: var(--dim2); font-size: 12px; white-space: nowrap; }
+
+#thr-range {
+  width: 80px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+#thr-val {
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  color: var(--accent2);
+  min-width: 30px;
+  text-align: right;
+}
+
+.btn {
+  padding: 6px 14px;
+  background: var(--s2);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  letter-spacing: .04em;
+  transition: background .12s, border-color .12s, color .12s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.btn:hover { background: var(--s3); border-color: #444; }
+.btn:active { background: #2a2a2a; }
+.btn:disabled { opacity: .28; cursor: not-allowed; pointer-events: none; }
+
+.btn-go {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+.btn-go:hover { background: var(--accent2); border-color: var(--accent2); }
+
+.btn-stop:hover { border-color: var(--red); color: var(--red); background: #1a0a0a; }
+
+/* ── Main area ─────────────────────────────────────────── */
+#main {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Image pane */
+#imgpane {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+}
+
+#img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: none;
+  opacity: 0;
+  transition: opacity .22s;
+}
+#img.loaded { opacity: 1; }
+
+#placeholder {
+  color: var(--dim);
+  font-size: 13px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+#img-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.55);
+  pointer-events: none;
+}
+#img-overlay.show { display: flex; }
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Sidebar */
+#sidebar {
+  width: 240px;
+  background: var(--s1);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.sbox {
+  padding: 13px 13px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.slabel {
+  font-size: 11px;
+  letter-spacing: .12em;
+  color: var(--dim2);
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+/* Score */
+#score-num {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 52px;
+  font-weight: 200;
+  line-height: 1;
+  letter-spacing: -.03em;
+  color: var(--text);
+  margin-bottom: 12px;
+  transition: color .4s;
+}
+
+#score-track {
+  height: 2px;
+  background: var(--border2);
+  margin-bottom: 3px;
+}
+#score-fill {
+  height: 100%;
+  width: 0;
+  transition: width .5s cubic-bezier(.4,0,.2,1), background .4s;
+}
+#score-axis {
+  display: flex;
+  justify-content: space-between;
+  color: var(--dim);
+  font-size: 9px;
+  font-family: ui-monospace, monospace;
+  margin-top: 2px;
+}
+
+/* Nav buttons */
+.nav-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim2);
+  font-size: 12px;
+  margin-bottom: 8px;
+  letter-spacing: .04em;
+}
+.kl {
+  display: inline-block;
+  background: var(--s3);
+  border: 1px solid var(--border2);
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  color: var(--dim2);
+  line-height: 1.5;
+}
+
+.nav-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.btn-nav {
+  padding: 10px 0;
+  text-align: center;
+  background: var(--s2);
+  border: 1px solid var(--border);
+  color: var(--dim2);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  letter-spacing: .04em;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.btn-nav:hover { background: var(--s3); border-color: var(--border2); color: var(--text); }
+.btn-nav:active { background: #2a2a2a; }
+
+/* Save */
+#save-btn {
+  width: 100%;
+  padding: 11px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  transition: background .15s, color .15s;
+}
+#save-btn:hover { background: var(--accent); color: #000; font-weight: 700; }
+#save-btn:active { background: var(--accent2); }
+
+/* Path */
+.sbox-path {
+  flex: 1;
+  padding: 13px 13px;
+  overflow: hidden;
+}
+
+#path-text {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--dim2);
+  word-break: break-all;
+  line-height: 1.6;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+/* ── Status bar ────────────────────────────────────────── */
+#statusbar {
+  padding: 5px 12px;
+  background: var(--s1);
+  border-top: 1px solid var(--border);
+  color: var(--dim2);
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: .02em;
+  height: 28px;
+}
+</style>
+</head>
+<body>
+
+<!-- Toolbar -->
+<div id="toolbar">
+  <div id="run-dot"></div>
+
+  <div id="folder-wrap">
+    <input id="folder-input" type="text" spellcheck="false" placeholder="フォルダパス">
+    <button id="browse-btn" title="フォルダ選択">📁</button>
+  </div>
+
+  <div class="sep"></div>
+  <span class="tl">閾値</span>
+  <input id="thr-range" type="range" min="4" max="6" step="0.1" value="5.0">
+  <span id="thr-val">5.0</span>
+  <div class="sep"></div>
+
+  <button class="btn btn-go" id="start-btn">▶ 評価</button>
+  <button class="btn btn-stop" id="stop-btn">■ 停止</button>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Image pane -->
+  <div id="imgpane">
+    <div id="placeholder">NO IMAGE</div>
+    <img id="img" alt="">
+    <div id="img-overlay"><div class="spinner"></div></div>
+  </div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+
+    <div class="sbox">
+      <div class="slabel">Score</div>
+      <div id="score-num">—</div>
+      <div id="score-track"><div id="score-fill"></div></div>
+      <div id="score-axis"><span>4.0</span><span>5.0</span><span>6.0</span></div>
+    </div>
+
+    <div class="sbox">
+      <div class="nav-label">
+        履歴
+        <span class="kl">↑</span><span class="kl">↓</span>
+      </div>
+      <div class="nav-row">
+        <button class="btn-nav" id="ph-btn">◀ 前</button>
+        <button class="btn-nav" id="nh-btn">次 ▶</button>
+      </div>
+    </div>
+
+    <div class="sbox">
+      <div class="nav-label">
+        前後
+        <span class="kl">←</span><span class="kl">→</span>
+      </div>
+      <div class="nav-row">
+        <button class="btn-nav" id="pf-btn">◀ 前</button>
+        <button class="btn-nav" id="nf-btn">次 ▶</button>
+      </div>
+    </div>
+
+    <div class="sbox">
+      <button id="save-btn">保存 &nbsp;<span class="kl">S</span></button>
+    </div>
+
+    <div class="sbox-path">
+      <div class="slabel">ファイル</div>
+      <div id="path-text">—</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Status bar -->
+<div id="statusbar">準備完了</div>
+
+<script>
+'use strict';
+
+// Elements
+const $ = id => document.getElementById(id);
+const folderInput = $('folder-input');
+const thrRange    = $('thr-range');
+const thrVal      = $('thr-val');
+const startBtn    = $('start-btn');
+const stopBtn     = $('stop-btn');
+const browseBtn   = $('browse-btn');
+const phBtn       = $('ph-btn');
+const nhBtn       = $('nh-btn');
+const pfBtn       = $('pf-btn');
+const nfBtn       = $('nf-btn');
+const saveBtn     = $('save-btn');
+const img         = $('img');
+const placeholder = $('placeholder');
+const overlay     = $('img-overlay');
+const scoreNum    = $('score-num');
+const scoreFill   = $('score-fill');
+const pathText    = $('path-text');
+const statusBar   = $('statusbar');
+const runDot      = $('run-dot');
+
+let currentPath = null;
+let evtSource   = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────
+fetch('/api/default-folder').then(r => r.json()).then(d => {
+  if (d.folder) folderInput.value = d.folder;
+});
+
+thrRange.addEventListener('input', () => {
+  thrVal.textContent = parseFloat(thrRange.value).toFixed(1);
+});
+
+// ── Score display ─────────────────────────────────────────────────────────
+function showScore(score) {
+  scoreNum.textContent = score.toFixed(2);
+
+  let color;
+  if      (score >= 5.5) color = 'var(--green)';
+  else if (score >= 5.0) color = '#8bc34a';
+  else if (score >= 4.5) color = 'var(--amber)';
+  else                   color = 'var(--red)';
+
+  scoreNum.style.color    = color;
+  scoreFill.style.background = color;
+
+  const pct = Math.min(100, Math.max(0, (score - 4.0) / 2.0 * 100));
+  scoreFill.style.width = pct + '%';
+}
+
+function clearScore() {
+  scoreNum.textContent    = '—';
+  scoreNum.style.color    = '';
+  scoreFill.style.width   = '0';
+  scoreFill.style.background = '';
+}
+
+// ── Image display ─────────────────────────────────────────────────────────
+function showImage(path, score, status) {
+  currentPath = path;
+
+  img.classList.remove('loaded');
+  overlay.classList.add('show');
+
+  img.onload = () => {
+    overlay.classList.remove('show');
+    img.style.display = 'block';
+    img.classList.add('loaded');
+    placeholder.style.display = 'none';
+  };
+  img.onerror = () => {
+    overlay.classList.remove('show');
+  };
+
+  img.src = '/api/image?path=' + encodeURIComponent(path);
+
+  if (score !== null && score !== undefined) showScore(score);
+  pathText.textContent = path;
+  if (status) setStatus(status);
+}
+
+function setStatus(msg) {
+  statusBar.textContent = msg;
+}
+
+function setRunning(on) {
+  runDot.classList.toggle('on', on);
+  startBtn.disabled = on;
+  stopBtn.disabled  = !on;
+}
+
+// ── Browse ────────────────────────────────────────────────────────────────
+browseBtn.addEventListener('click', async () => {
+  browseBtn.disabled = true;
+  setStatus('フォルダ選択ダイアログを開いています...');
+  try {
+    const d = await fetch('/api/browse').then(r => r.json());
+    if (d.folder) {
+      folderInput.value = d.folder;
+      setStatus('フォルダ: ' + d.folder);
+    } else {
+      setStatus('キャンセルしました');
+    }
+  } finally {
+    browseBtn.disabled = false;
+  }
+});
+
+// ── Evaluate (SSE) ────────────────────────────────────────────────────────
+startBtn.addEventListener('click', () => {
+  const folder = folderInput.value.trim();
+  if (!folder) { setStatus('フォルダパスを入力してください'); return; }
+
+  if (evtSource) { evtSource.close(); evtSource = null; }
+
+  setRunning(true);
+  clearScore();
+  setStatus('評価開始中...');
+
+  const threshold = parseFloat(thrRange.value);
+  evtSource = new EventSource(
+    `/api/evaluate?folder=${encodeURIComponent(folder)}&threshold=${threshold}`
+  );
+
+  evtSource.onmessage = e => {
+    const d = JSON.parse(e.data);
+
+    if (d.type === 'done') {
+      evtSource.close(); evtSource = null;
+      setRunning(false);
+      setStatus('評価完了');
+    } else if (d.type === 'update') {
+      const fname = d.path.replace(/.*[/\\]/, '');
+      const above = d.score >= threshold;
+      showImage(d.path, d.score,
+        above
+          ? `閾値以上: ${fname} (${d.score.toFixed(2)})`
+          : `[${d.index}/${d.total}] ${fname} — ${d.score.toFixed(2)}`
+      );
+    } else if (d.type === 'error') {
+      setStatus('エラー: ' + d.message);
+      setRunning(false);
+      evtSource.close(); evtSource = null;
+    }
+  };
+
+  evtSource.onerror = () => {
+    evtSource.close(); evtSource = null;
+    setRunning(false);
+    setStatus('接続エラー');
+  };
+});
+
+// ── Stop ──────────────────────────────────────────────────────────────────
+stopBtn.addEventListener('click', async () => {
+  await fetch('/api/stop', { method: 'POST' });
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  setRunning(false);
+  setStatus('停止しました');
+});
+
+// ── Navigate ──────────────────────────────────────────────────────────────
+async function navigate(dir) {
+  overlay.classList.add('show');
+  try {
+    const d = await fetch(`/api/navigate?direction=${dir}`).then(r => r.json());
+    if (d.error) {
+      overlay.classList.remove('show');
+      setStatus(d.error);
+    } else {
+      showImage(d.path, d.score, d.status);
+    }
+  } catch (err) {
+    overlay.classList.remove('show');
+    setStatus('エラー: ' + err.message);
+  }
+}
+
+phBtn.addEventListener('click', () => navigate('prev_history'));
+nhBtn.addEventListener('click', () => navigate('next_history'));
+pfBtn.addEventListener('click', () => navigate('prev_folder'));
+nfBtn.addEventListener('click', () => navigate('next_folder'));
+
+// ── Save ──────────────────────────────────────────────────────────────────
+saveBtn.addEventListener('click', async () => {
+  if (!currentPath) { setStatus('保存する画像がありません'); return; }
+  const d = await fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: currentPath })
+  }).then(r => r.json());
+  setStatus(d.message);
+});
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.target === folderInput) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  switch (e.key) {
+    case 'ArrowLeft':  e.preventDefault(); navigate('prev_folder');   break;
+    case 'ArrowRight': e.preventDefault(); navigate('next_folder');   break;
+    case 'ArrowUp':    e.preventDefault(); navigate('prev_history');  break;
+    case 'ArrowDown':  e.preventDefault(); navigate('next_history');  break;
+    case 's': case 'S': saveBtn.click(); break;
+    case 'Enter':       startBtn.click(); break;
+    case 'Escape':      stopBtn.click();  break;
+  }
+});
+
+// Init button states
+setRunning(false);
+</script>
+</body>
+</html>
