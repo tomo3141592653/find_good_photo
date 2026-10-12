@@ -31,6 +31,24 @@ from PIL import Image
 # ---------------------------------------------------------------------------
 
 default_folder_name = Path("default_folder_name.txt").read_text().strip()
+LAST_FOLDER_FILE = Path(__file__).parent / "last_folder.txt"
+
+
+def get_last_folder() -> str:
+    try:
+        folder = LAST_FOLDER_FILE.read_text(encoding="utf-8").strip()
+        if folder and os.path.isdir(folder):
+            return folder
+    except OSError:
+        pass
+    return default_folder_name
+
+
+def remember_folder(folder: str):
+    try:
+        LAST_FOLDER_FILE.write_text(folder, encoding="utf-8")
+    except OSError:
+        pass
 
 
 class AestheticPredictor(nn.Module):
@@ -87,6 +105,62 @@ current_showing_index = -1
 last_processed_folder = ""
 
 eval_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="eval")
+
+# Each entry is the list of files created by one save action (single or bulk)
+save_log: list[list[str]] = []
+
+CACHE_DIR = Path(__file__).parent / "score_cache"
+
+# ---------------------------------------------------------------------------
+# Persistent score cache (per folder, keyed by path + mtime + size)
+# ---------------------------------------------------------------------------
+
+
+def _cache_file(folder_path: str) -> Path:
+    key = hashlib.md5(os.path.normcase(os.path.abspath(folder_path)).encode("utf-8")).hexdigest()[:16]
+    return CACHE_DIR / f"{key}.json"
+
+
+def _file_sig(path: str) -> Optional[list]:
+    try:
+        st = os.stat(path)
+        return [st.st_mtime, st.st_size]
+    except OSError:
+        return None
+
+
+def load_score_cache(folder_path: str, files: list[str]) -> dict[str, float]:
+    cf = _cache_file(folder_path)
+    if not cf.exists():
+        return {}
+    try:
+        data = json.loads(cf.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if data.get("model") != state_name:
+        return {}
+    saved = data.get("scores", {})
+    loaded = {}
+    for p in files:
+        entry = saved.get(p)
+        if entry and _file_sig(p) == entry[1:]:
+            loaded[p] = entry[0]
+    return loaded
+
+
+def save_score_cache(folder_path: str):
+    scores = {}
+    for p, s in list(scores_cache.items()):
+        sig = _file_sig(p)
+        if sig:
+            scores[p] = [s, *sig]
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        _cache_file(folder_path).write_text(
+            json.dumps({"model": state_name, "scores": scores}, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"Cache save failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Image helpers
@@ -179,10 +253,11 @@ def update_stack(folder_path: str) -> list[str]:
         images_in_folder_index.clear()
         images_in_folder_index.update({p: i for i, p in enumerate(files)})
         scores_cache.clear()
+        scores_cache.update(load_score_cache(folder_path, files))
         all_processed_images.clear()
         history_index = -1
         last_processed_folder = folder_path
-        print(f"{len(images_in_folder)} images in {folder_path}")
+        print(f"{len(images_in_folder)} images in {folder_path} ({len(scores_cache)} cached scores)")
 
     sample = list(images_in_folder)
     random.shuffle(sample)
@@ -195,18 +270,29 @@ def update_stack(folder_path: str) -> list[str]:
 
 
 def process_images(folder_path: str, threshold: float):
-    global is_running, current_showing_index, history_index
-
     current_images = update_stack(folder_path)
+    try:
+        yield from _process_loop(current_images, threshold, folder_path)
+    finally:
+        save_score_cache(folder_path)
+
+
+def _process_loop(current_images, threshold, folder_path):
+    global is_running, current_showing_index, history_index
     total = len(current_images)
+    new_count = 0
 
     for i, image_path in enumerate(current_images):
         if not is_running:
             break
         try:
-            image = get_image(image_path)
-            score = get_score(image)
-            scores_cache[image_path] = score
+            score = scores_cache.get(image_path)
+            if score is None:
+                score = get_score(get_image(image_path))
+                scores_cache[image_path] = score
+                new_count += 1
+                if new_count % 20 == 0:
+                    save_score_cache(folder_path)
             all_processed_images.append((image_path, score))
             history_index = len(all_processed_images) - 1
             current_showing_index = images_in_folder_index.get(image_path, -1)
@@ -300,7 +386,7 @@ NAV_FUNCS = {
 # ---------------------------------------------------------------------------
 
 
-def copy_image(image_path: str) -> str:
+def copy_image(image_path: str, created: Optional[list] = None) -> str:
     if not image_path:
         return "画像がありません"
     good_folder = "good"
@@ -332,7 +418,86 @@ def copy_image(image_path: str) -> str:
         dest_path = f"{base}-{i}{ext}"
 
     shutil.copy(original_path, dest_path)
+    if created is not None:
+        created.append(dest_path)
     return f"保存しました: {dest_path}"
+
+
+def save_images(paths: list[str]) -> str:
+    if not paths:
+        return "画像がありません"
+    created: list[str] = []
+    messages = [copy_image(p, created) for p in paths]
+    if created:
+        save_log.append(created)
+    if len(paths) == 1:
+        return messages[0]
+    skipped = len(paths) - len(created)
+    return f"{len(created)} 枚を保存しました" + (f"（{skipped} 枚は保存済み/失敗）" if skipped else "")
+
+
+def undo_last_save() -> str:
+    if not save_log:
+        return "取り消せる保存がありません"
+    created = save_log.pop()
+    removed = 0
+    for dest in created:
+        try:
+            os.remove(dest)
+            removed += 1
+        except OSError:
+            pass
+    return f"保存を取り消しました（{removed} 枚削除）"
+
+
+LIGHTROOM_CANDIDATES = [
+    r"C:\Program Files\Adobe\Adobe Lightroom Classic\Lightroom.exe",
+    r"C:\Program Files\Adobe\Adobe Lightroom CC\lightroom.exe",
+]
+
+
+def find_original(image_path: str) -> str:
+    for suffix in (".NEF", ".ARW"):
+        raw_path = os.path.splitext(image_path)[0] + suffix
+        if os.path.exists(raw_path):
+            return raw_path
+    return image_path
+
+
+def open_in_lightroom(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return "ファイルが見つかりません"
+    exe = next((c for c in LIGHTROOM_CANDIDATES if os.path.exists(c)), None)
+    if not exe:
+        return "Lightroom が見つかりません"
+    target = find_original(path)
+    subprocess.Popen([exe, os.path.normpath(target)])
+    return f"Lightroom で開きます: {os.path.basename(target)}"
+
+
+def reveal_in_explorer(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return "ファイルが見つかりません"
+    if platform.system() == "Windows":
+        subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+    return "フォルダを開きました"
+
+
+def open_saved_folder() -> str:
+    # copy_image と同じく作業フォルダ基準の good を開く
+    folder = os.path.abspath("good")
+    os.makedirs(folder, exist_ok=True)
+    if platform.system() == "Windows":
+        subprocess.Popen(["explorer", os.path.normpath(folder)])
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", folder])
+    else:
+        subprocess.Popen(["xdg-open", folder])
+    return "保存先のフォルダを開きました"
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +516,7 @@ async def index():
 
 @app.get("/api/default-folder")
 async def get_default_folder():
-    return {"folder": default_folder_name}
+    return {"folder": get_last_folder()}
 
 
 @app.get("/api/browse")
@@ -364,6 +529,8 @@ async def browse():
     )
     result = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
     folder = result.stdout.strip()
+    if folder:
+        remember_folder(folder)
     return {"folder": folder if folder else None}
 
 
@@ -381,6 +548,9 @@ async def serve_image(path: str):
 @app.get("/api/evaluate")
 async def evaluate(request: Request, folder: str = "", threshold: float = 5.0):
     global is_running
+
+    if folder and os.path.isdir(folder):
+        remember_folder(folder)
 
     async def event_gen():
         global is_running
@@ -446,8 +616,31 @@ async def save(request: Request):
     data = await request.json()
     path = data.get("path", "")
     loop = asyncio.get_running_loop()
-    message = await loop.run_in_executor(None, copy_image, path)
+    message = await loop.run_in_executor(None, save_images, [path] if path else [])
     return {"message": message}
+
+
+@app.post("/api/undo-save")
+async def undo_save():
+    loop = asyncio.get_running_loop()
+    return {"message": await loop.run_in_executor(None, undo_last_save)}
+
+
+@app.post("/api/lightroom")
+async def lightroom(request: Request):
+    data = await request.json()
+    return {"message": open_in_lightroom(data.get("path", ""))}
+
+
+@app.post("/api/reveal")
+async def reveal(request: Request):
+    data = await request.json()
+    return {"message": reveal_in_explorer(data.get("path", ""))}
+
+
+@app.post("/api/open-saved")
+async def open_saved():
+    return {"message": open_saved_folder()}
 
 
 if __name__ == "__main__":

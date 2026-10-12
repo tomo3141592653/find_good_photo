@@ -321,6 +321,24 @@ body {
 #save-btn:hover { background: var(--accent); color: #000; font-weight: 700; }
 #save-btn:active { background: var(--accent2); }
 
+.sub-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+.btn-sub {
+  padding: 8px 0;
+  background: var(--s2);
+  border: 1px solid var(--border);
+  color: var(--dim2);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.btn-sub:hover { background: var(--s3); border-color: var(--border2); color: var(--text); }
+
 /* Path */
 .sbox-path {
   flex: 1;
@@ -337,6 +355,8 @@ body {
   max-height: 100%;
   overflow: hidden;
 }
+#path-text.link { cursor: pointer; }
+#path-text.link:hover { color: var(--accent2); text-decoration: underline; }
 
 /* ── Status bar ────────────────────────────────────────── */
 #statusbar {
@@ -420,10 +440,15 @@ body {
 
     <div class="sbox">
       <button id="save-btn">保存 &nbsp;<span class="kl">S</span></button>
+      <div class="sub-row">
+        <button class="btn-sub" id="undo-btn">保存を取り消し <span class="kl">U</span></button>
+        <button class="btn-sub" id="lr-btn">Lightroomで開く <span class="kl">L</span></button>
+        <button class="btn-sub" id="saved-btn">保存先を開く <span class="kl">O</span></button>
+      </div>
     </div>
 
     <div class="sbox-path">
-      <div class="slabel">ファイル</div>
+      <div class="slabel">ファイル <span style="text-transform:none;letter-spacing:0">（クリックでフォルダを開く）</span></div>
       <div id="path-text">—</div>
     </div>
 
@@ -515,6 +540,7 @@ function showImage(path, score, status) {
 
   if (score !== null && score !== undefined) showScore(score);
   pathText.textContent = path;
+  pathText.classList.add('link');
   if (status) setStatus(status);
 }
 
@@ -631,6 +657,26 @@ saveBtn.addEventListener('click', async () => {
   setStatus(d.message);
 });
 
+// ── Undo / reveal ─────────────────────────────────────────────
+async function post(url, body) {
+  const d = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  }).then(r => r.json());
+  setStatus(d.message);
+}
+
+$('undo-btn').addEventListener('click', () => post('/api/undo-save'));
+$('lr-btn').addEventListener('click', () => {
+  if (!currentPath) { setStatus('開く画像がありません'); return; }
+  post('/api/lightroom', { path: currentPath });
+});
+$('saved-btn').addEventListener('click', () => post('/api/open-saved'));
+pathText.addEventListener('click', () => {
+  if (currentPath) post('/api/reveal', { path: currentPath });
+});
+
 // ── Keyboard shortcuts ────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (e.target === folderInput) return;
@@ -642,6 +688,9 @@ document.addEventListener('keydown', e => {
     case 'ArrowUp':    e.preventDefault(); navigate('prev_history');  break;
     case 'ArrowDown':  e.preventDefault(); navigate('next_history');  break;
     case 's': case 'S': saveBtn.click(); break;
+    case 'u': case 'U': $('undo-btn').click(); break;
+    case 'l': case 'L': $('lr-btn').click(); break;
+    case 'o': case 'O': $('saved-btn').click(); break;
     case 'Enter':       startBtn.click(); break;
     case 'Escape':      stopBtn.click();  break;
   }

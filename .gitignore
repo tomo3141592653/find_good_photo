@@ -1,2 +1,6 @@
 good/
 *.jpg
+score_cache/
+last_folder.txt
+server.log
+server.err.log
