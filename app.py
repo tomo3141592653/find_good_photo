@@ -386,41 +386,64 @@ NAV_FUNCS = {
 # ---------------------------------------------------------------------------
 
 
-def copy_image(image_path: str, created: Optional[list] = None) -> str:
-    if not image_path:
-        return "画像がありません"
-    good_folder = "good"
-    os.makedirs(good_folder, exist_ok=True)
+RAW_EXTS = (".nef", ".arw")
+JPG_EXTS = (".jpg", ".jpeg", ".heic")
 
-    original_path = image_path
-    for suffix in (".NEF", ".ARW"):
-        raw_path = os.path.splitext(image_path)[0] + suffix
-        if os.path.exists(raw_path):
-            original_path = raw_path
-            break
 
-    dest_path = os.path.join(good_folder, os.path.basename(original_path))
+def companion_files(image_path: str) -> list[str]:
+    """選んだ写真と、同じ名前の RAW / JPG をまとめて返す（拡張子の大文字小文字は問わない）。
+    JPG を選んでも RAW を選んでも、両方そろって保存されるようにする。"""
+    folder = os.path.dirname(image_path) or "."
+    stem = os.path.splitext(os.path.basename(image_path))[0].lower()
+    found = [image_path]
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return found
+    for name in sorted(names):
+        base, ext = os.path.splitext(name)
+        p = os.path.join(folder, name)
+        if base.lower() == stem and ext.lower() in RAW_EXTS + JPG_EXTS and os.path.normcase(p) != os.path.normcase(image_path):
+            found.append(p)
+    return found
 
-    def file_hash(fp):
-        h = hashlib.md5()
-        with open(fp, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        return h.hexdigest()
 
+def _file_hash(fp):
+    h = hashlib.md5()
+    with open(fp, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _copy_one(src: str, good_folder: str, created: Optional[list]) -> bool:
+    """1ファイルを good に写す。同じ中身が既にあれば写さず False"""
+    dest_path = os.path.join(good_folder, os.path.basename(src))
     if os.path.exists(dest_path):
-        if file_hash(original_path) == file_hash(dest_path):
-            return f"既に保存済み: {dest_path}"
+        if _file_hash(src) == _file_hash(dest_path):
+            return False
         base, ext = os.path.splitext(dest_path)
         i = 2
         while os.path.exists(f"{base}-{i}{ext}"):
             i += 1
         dest_path = f"{base}-{i}{ext}"
-
-    shutil.copy(original_path, dest_path)
+    shutil.copy(src, dest_path)
     if created is not None:
         created.append(dest_path)
-    return f"保存しました: {dest_path}"
+    return True
+
+
+def copy_image(image_path: str, created: Optional[list] = None) -> str:
+    """選んだ写真を good に保存する。同じ名前の RAW と JPG は両方とも保存する"""
+    if not image_path:
+        return "画像がありません"
+    good_folder = "good"
+    os.makedirs(good_folder, exist_ok=True)
+    files = companion_files(image_path)
+    copied = [os.path.basename(f) for f in files if _copy_one(f, good_folder, created)]
+    if not copied:
+        return f"既に保存済み: {', '.join(os.path.basename(f) for f in files)}"
+    return f"保存しました: {', '.join(copied)}"
 
 
 def save_images(paths: list[str]) -> str:
@@ -432,8 +455,9 @@ def save_images(paths: list[str]) -> str:
         save_log.append(created)
     if len(paths) == 1:
         return messages[0]
-    skipped = len(paths) - len(created)
-    return f"{len(created)} 枚を保存しました" + (f"（{skipped} 枚は保存済み/失敗）" if skipped else "")
+    done = sum(1 for m in messages if m.startswith("保存しました"))
+    skipped = len(paths) - done
+    return f"{done} 枚を保存しました（RAWとJPGの両方）" + (f"（{skipped} 枚は保存済み/失敗）" if skipped else "")
 
 
 def undo_last_save() -> str:
