@@ -373,6 +373,87 @@ body {
   letter-spacing: .02em;
   height: 28px;
 }
+
+/* ── フォルダ選び（スマホ） ───────────────────────────────── */
+#sheet {
+  position: fixed; inset: 0; z-index: 10;
+  display: none; flex-direction: column;
+  background: rgba(0,0,0,.6);
+}
+#sheet.show { display: flex; }
+#sheet-panel {
+  margin-top: auto; max-height: 82dvh;
+  display: flex; flex-direction: column;
+  background: var(--s1); border-top: 1px solid var(--border2);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#sheet-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+#sheet-path {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 13px; color: var(--dim2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+#sheet-close { background: none; border: none; color: var(--dim2); font-size: 15px; padding: 8px 10px; cursor: pointer; font-family: inherit; }
+#sheet-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.dir-item {
+  display: block; width: 100%; text-align: left;
+  padding: 14px 16px; background: none; border: none; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 15px; font-family: inherit; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dir-item:active { background: var(--s3); }
+.dir-item.up { color: var(--dim2); }
+.dir-empty { padding: 18px 16px; color: var(--dim2); font-size: 13px; }
+#sheet-use {
+  margin: 12px 14px; padding: 15px; border: none;
+  background: var(--accent); color: #000; font-weight: 700; font-size: 15px; font-family: inherit; letter-spacing: .04em;
+}
+#sheet-use:disabled { opacity: .3; }
+
+#save-btn.done { background: var(--green); border-color: var(--green); color: #000; }
+
+/* ── スマホ ─────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  html, body { height: 100dvh; }
+  body { font-size: 15px; }
+
+  #toolbar { flex-wrap: wrap; height: auto; padding: 8px 10px; gap: 8px; }
+  #folder-wrap { flex: 1 1 calc(100% - 20px); height: 42px; }
+  #folder-input { font-size: 16px; }
+  #browse-btn { padding: 0 14px; font-size: 16px; }
+  .sep { display: none; }
+  #thr-range { flex: 1; width: auto; height: 32px; }
+  .btn { padding: 0 16px; height: 42px; font-size: 15px; }
+  /* 評価と停止は同じ場所に、いま押せるほうだけ出す */
+  #start-btn:disabled, #stop-btn:disabled { display: none; }
+
+  #main { flex-direction: column; }
+  #imgpane { touch-action: pan-y pinch-zoom; }
+
+  #sidebar { width: 100%; border-left: none; border-top: 1px solid var(--border); }
+  #sidebar .slabel, .kl, .sbox-path, #lr-btn, #saved-btn { display: none; }
+
+  .sbox { padding: 8px 12px; }
+  .score-box { display: flex; align-items: center; gap: 14px; }
+  #score-num { font-size: 30px; margin: 0; min-width: 3.2em; }
+  .score-bar { flex: 1; }
+
+  .nav-box { display: flex; align-items: center; gap: 10px; }
+  .nav-label { margin: 0; width: 2.6em; flex-shrink: 0; font-size: 13px; }
+  .nav-row { flex: 1; }
+  .btn-nav { padding: 12px 0; font-size: 15px; }
+
+  .save-box { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; }
+  #save-btn { padding: 16px; font-size: 16px; }
+  .sub-row { margin: 0; }
+  .btn-sub { height: 100%; font-size: 13px; }
+
+  #statusbar { height: auto; padding: 6px 12px calc(6px + env(safe-area-inset-bottom)); }
+}
 </style>
 </head>
 <body>
@@ -409,14 +490,16 @@ body {
   <!-- Sidebar -->
   <div id="sidebar">
 
-    <div class="sbox">
+    <div class="sbox score-box">
       <div class="slabel">Score</div>
       <div id="score-num">—</div>
-      <div id="score-track"><div id="score-fill"></div></div>
-      <div id="score-axis"><span>4.0</span><span>5.0</span><span>6.0</span></div>
+      <div class="score-bar">
+        <div id="score-track"><div id="score-fill"></div></div>
+        <div id="score-axis"><span>4.0</span><span>5.0</span><span>6.0</span></div>
+      </div>
     </div>
 
-    <div class="sbox">
+    <div class="sbox nav-box">
       <div class="nav-label">
         履歴
         <span class="kl">↑</span><span class="kl">↓</span>
@@ -427,7 +510,7 @@ body {
       </div>
     </div>
 
-    <div class="sbox">
+    <div class="sbox nav-box">
       <div class="nav-label">
         前後
         <span class="kl">←</span><span class="kl">→</span>
@@ -438,7 +521,7 @@ body {
       </div>
     </div>
 
-    <div class="sbox">
+    <div class="sbox save-box">
       <button id="save-btn">保存 &nbsp;<span class="kl">S</span></button>
       <div class="sub-row">
         <button class="btn-sub" id="undo-btn">保存を取り消し <span class="kl">U</span></button>
@@ -452,6 +535,18 @@ body {
       <div id="path-text">—</div>
     </div>
 
+  </div>
+</div>
+
+<!-- フォルダ選び（スマホ） -->
+<div id="sheet">
+  <div id="sheet-panel">
+    <div id="sheet-head">
+      <div id="sheet-path"></div>
+      <button id="sheet-close">閉じる</button>
+    </div>
+    <div id="sheet-list"></div>
+    <button id="sheet-use">このフォルダを評価する</button>
   </div>
 </div>
 
@@ -485,6 +580,11 @@ const runDot      = $('run-dot');
 
 let currentPath = null;
 let evtSource   = null;
+
+// スマホ（狭い画面・指で操作）では、画像を小さく送ってもらい、フォルダはこの画面の中で選ぶ
+const small = matchMedia('(max-width: 760px)');
+const touch = matchMedia('(pointer: coarse)');
+const imgQuery = () => small.matches ? '&max=1440&q=80' : '';
 
 // ── Init ──────────────────────────────────────────────────────────────────
 fetch('/api/default-folder').then(r => r.json()).then(d => {
@@ -536,7 +636,7 @@ function showImage(path, score, status) {
     overlay.classList.remove('show');
   };
 
-  img.src = '/api/image?path=' + encodeURIComponent(path);
+  img.src = '/api/image?path=' + encodeURIComponent(path) + imgQuery();
 
   if (score !== null && score !== undefined) showScore(score);
   pathText.textContent = path;
@@ -556,6 +656,7 @@ function setRunning(on) {
 
 // ── Browse ────────────────────────────────────────────────────────────────
 browseBtn.addEventListener('click', async () => {
+  if (small.matches || touch.matches) { openSheet(folderInput.value.trim()); return; }
   browseBtn.disabled = true;
   setStatus('フォルダ選択ダイアログを開いています...');
   try {
@@ -570,6 +671,76 @@ browseBtn.addEventListener('click', async () => {
     browseBtn.disabled = false;
   }
 });
+
+// ── フォルダ選び（スマホ）: パソコンのフォルダをたどって選ぶ ─────────────
+const sheet = $('sheet'), sheetList = $('sheet-list'), sheetPath = $('sheet-path'), sheetUse = $('sheet-use');
+let sheetDir = '';
+
+function dirButton(label, target, cls) {
+  const b = document.createElement('button');
+  b.className = 'dir-item' + (cls ? ' ' + cls : '');
+  b.textContent = label;
+  b.addEventListener('click', () => loadDir(target));
+  return b;
+}
+
+async function loadDir(path) {
+  sheetList.textContent = '';
+  let d;
+  try {
+    d = await fetch('/api/dirs?path=' + encodeURIComponent(path)).then(r => r.json());
+  } catch (err) {
+    d = { error: '読み込めませんでした' };
+  }
+  if (d.error) {
+    if (path) { loadDir(''); return; }
+    const e = document.createElement('div'); e.className = 'dir-empty'; e.textContent = d.error;
+    sheetList.appendChild(e); return;
+  }
+  sheetDir = d.path;
+  sheetPath.textContent = d.path || 'ドライブ';
+  if (d.parent !== null) sheetList.appendChild(dirButton('↑ ひとつ上へ', d.parent, 'up'));
+  for (const name of d.dirs) {
+    const target = d.path ? d.path.replace(/[\\/]$/, '') + '\\' + name : name;
+    sheetList.appendChild(dirButton(name, target));
+  }
+  if (!d.dirs.length) {
+    const e = document.createElement('div'); e.className = 'dir-empty'; e.textContent = 'フォルダはありません';
+    sheetList.appendChild(e);
+  }
+  sheetUse.disabled = !d.path;
+  sheetUse.textContent = d.images ? `このフォルダを評価する（写真 ${d.images} 枚）` : 'このフォルダを評価する';
+  sheetList.scrollTop = 0;
+}
+
+function openSheet(start) {
+  sheet.classList.add('show');
+  loadDir(start);
+}
+$('sheet-close').addEventListener('click', () => sheet.classList.remove('show'));
+sheet.addEventListener('click', e => { if (e.target === sheet) sheet.classList.remove('show'); });
+sheetUse.addEventListener('click', () => {
+  if (!sheetDir) return;
+  folderInput.value = sheetDir;
+  sheet.classList.remove('show');
+  startBtn.click();
+});
+
+// ── スワイプで前後の写真へ ──────────────────────────────────
+{
+  let sx = null, sy = null;
+  const pane = $('imgpane');
+  pane.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { sx = null; return; }
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+  }, { passive: true });
+  pane.addEventListener('touchend', e => {
+    if (sx === null) return;
+    const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
+    sx = null;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) navigate(dx < 0 ? 'next_folder' : 'prev_folder');
+  });
+}
 
 // ── Evaluate (SSE) ────────────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
@@ -655,6 +826,11 @@ saveBtn.addEventListener('click', async () => {
     body: JSON.stringify({ path: currentPath })
   }).then(r => r.json());
   setStatus(d.message);
+  if (d.message && d.message.startsWith('保存しました')) {
+    saveBtn.classList.add('done');
+    if (navigator.vibrate) navigator.vibrate(30);
+    setTimeout(() => saveBtn.classList.remove('done'), 900);
+  }
 });
 
 // ── Undo / reveal ─────────────────────────────────────────────

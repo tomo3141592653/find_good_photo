@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import glob
 import hashlib
 import io
@@ -226,9 +227,13 @@ def get_score(image: Image.Image) -> float:
     return score.item()
 
 
-def image_to_jpeg_bytes(image: Image.Image) -> bytes:
+def image_to_jpeg_bytes(image: Image.Image, max_side: int = 1920, quality: int = 90) -> bytes:
+    """表示用に JPEG にする。スマホからは max_side と quality を下げて頼まれる（採点は元の画像で行う）"""
+    if max(image.size) > max_side:
+        image = image.copy()
+        image.thumbnail((max_side, max_side), Image.LANCZOS)
     buf = io.BytesIO()
-    image.convert("RGB").save(buf, format="JPEG", quality=90)
+    image.convert("RGB").save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
 
 
@@ -553,6 +558,40 @@ async def get_default_folder():
     return {"folder": get_last_folder()}
 
 
+IMAGE_EXTS = (".jpg", ".jpeg", ".arw", ".nef", ".heic")
+
+
+def list_dirs(path: str) -> dict:
+    """スマホのフォルダ選び用: path の下のフォルダと、直下の写真の枚数。path が空ならドライブの一覧"""
+    if not path:
+        drives = [f"{c}:\\" for c in "CDEFGH" if os.path.isdir(f"{c}:\\")]
+        return {"path": "", "parent": None, "dirs": drives, "images": 0}
+    path = os.path.normpath(path)
+    if not os.path.isdir(path):
+        return {"error": "フォルダが見つかりません"}
+    dirs, images = [], 0
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                if e.name.startswith((".", "$")):
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    dirs.append(e.name)
+                elif e.name.lower().endswith(IMAGE_EXTS):
+                    images += 1
+    except OSError as e:
+        return {"error": f"開けません: {e}"}
+    parent = os.path.dirname(path)
+    return {"path": path, "parent": "" if parent == path else parent,
+            "dirs": sorted(dirs, key=str.lower), "images": images}
+
+
+@app.get("/api/dirs")
+async def dirs(path: str = ""):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, list_dirs, path)
+
+
 @app.get("/api/browse")
 async def browse():
     script = (
@@ -569,11 +608,13 @@ async def browse():
 
 
 @app.get("/api/image")
-async def serve_image(path: str):
+async def serve_image(path: str, max: int = 1920, q: int = 90):
     try:
         loop = asyncio.get_running_loop()
         img = await loop.run_in_executor(None, get_image, path)
-        data = await loop.run_in_executor(None, image_to_jpeg_bytes, img)
+        side = min(1920, builtins.max(400, max))
+        quality = min(95, builtins.max(50, q))
+        data = await loop.run_in_executor(None, image_to_jpeg_bytes, img, side, quality)
         return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
