@@ -275,10 +275,10 @@ def update_stack(folder_path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def process_images(folder_path: str, threshold: float):
+def process_images(folder_path: str, threshold: float, min_show: float = None):
     current_images = update_stack(folder_path)
     try:
-        yield from _process_loop(current_images, threshold, folder_path)
+        yield from _process_loop(current_images, threshold, folder_path, MIN_SHOW if min_show is None else min_show)
     finally:
         save_score_cache(folder_path)
 
@@ -286,7 +286,7 @@ def process_images(folder_path: str, threshold: float):
 MIN_SHOW = 0.35   # 低い点数の写真を見せる最短の秒数（2026-11-07 朋義さん「もう少し時間かけて」）
 
 
-def _process_loop(current_images, threshold, folder_path):
+def _process_loop(current_images, threshold, folder_path, min_show=MIN_SHOW):
     global is_running, current_showing_index, history_index
     total = len(current_images)
     new_count = 0
@@ -309,7 +309,7 @@ def _process_loop(current_images, threshold, folder_path):
             print(f"[{i + 1}/{total}] {os.path.basename(image_path)}: {score:.2f}")
 
             # 点数を計算済みの写真は一瞬で流れて見えないので、閾値に届かない写真も最低 MIN_SHOW 秒は見せる
-            wait = MIN_SHOW - (time.monotonic() - last_shown)
+            wait = min_show - (time.monotonic() - last_shown)
             if wait > 0 and score < threshold:
                 time.sleep(wait)
             last_shown = time.monotonic()
@@ -621,7 +621,9 @@ async def serve_image(path: str, max: int = 1920, q: int = 90):
 
 
 @app.get("/api/evaluate")
-async def evaluate(request: Request, folder: str = "", threshold: float = 5.0):
+async def evaluate(request: Request, folder: str = "", threshold: float = 5.0, show: float = None):
+    # show: 閾値に届かない写真を見せる最短の秒数。スマホは画像が届くまでに時間がかかるので長めに頼む
+    min_show = None if show is None else min(3.0, builtins.max(0.0, show))
     global is_running
 
     if folder and os.path.isdir(folder):
@@ -635,7 +637,7 @@ async def evaluate(request: Request, folder: str = "", threshold: float = 5.0):
 
         def worker():
             try:
-                for result in process_images(folder, threshold):
+                for result in process_images(folder, threshold, min_show):
                     asyncio.run_coroutine_threadsafe(q.put(result), loop)
             except Exception as e:
                 asyncio.run_coroutine_threadsafe(q.put({"type": "error", "message": str(e)}), loop)

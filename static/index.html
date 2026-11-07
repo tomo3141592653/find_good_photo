@@ -595,7 +595,9 @@ let evtSource   = null;
 // スマホ（狭い画面・指で操作）では、画像を小さく送ってもらい、フォルダはこの画面の中で選ぶ
 const small = matchMedia('(max-width: 760px)');
 const touch = matchMedia('(pointer: coarse)');
-const imgQuery = () => small.matches ? '&max=1440&q=80' : '';
+// 評価中に流れていく低い点数の写真は、ちらっと見えればいいので小さく送ってもらう（早く届く）
+const imgQuery = quick => small.matches ? (quick ? '&max=720&q=70' : '&max=1440&q=80') : '';
+let running = false;
 
 // ── Init ──────────────────────────────────────────────────────────────────
 fetch('/api/default-folder').then(r => r.json()).then(d => {
@@ -631,7 +633,7 @@ function clearScore() {
 }
 
 // ── Image display ─────────────────────────────────────────────────────────
-function showImage(path, score, status) {
+function showImage(path, score, status, quick) {
   currentPath = path;
 
   img.classList.remove('loaded');
@@ -647,7 +649,7 @@ function showImage(path, score, status) {
     overlay.classList.remove('show');
   };
 
-  img.src = '/api/image?path=' + encodeURIComponent(path) + imgQuery();
+  img.src = '/api/image?path=' + encodeURIComponent(path) + imgQuery(quick);
 
   if (score !== null && score !== undefined) showScore(score);
   pathText.textContent = path;
@@ -660,6 +662,7 @@ function setStatus(msg) {
 }
 
 function setRunning(on) {
+  running = on;
   runDot.classList.toggle('on', on);
   startBtn.disabled = on;
   stopBtn.disabled  = !on;
@@ -750,12 +753,24 @@ sheetUse.addEventListener('click', () => {
     const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
     sx = null;
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) navigate(dx < 0 ? 'next_folder' : 'prev_folder');
-    else if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && small.matches) toggleNav();   // タップ
+    else if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && small.matches) tapImage();   // タップ
   });
 }
 
 // 前後・履歴のボタンを出し入れする（スマホ）
 function toggleNav() { document.body.classList.toggle('show-nav'); }
+
+// 評価中に写真をタップ（パソコンはクリック）すると、そこで止める。流れていく低い点数の写真にも
+// いいものがあるので、止めて履歴の「前」で見返せるよう、ボタンも出しておく
+function tapImage() {
+  if (running) {
+    document.body.classList.add('show-nav');
+    stopEval('止めました。履歴の「◀ 前」で流れた写真に戻れます');
+  } else {
+    toggleNav();
+  }
+}
+$('imgpane').addEventListener('click', () => { if (!small.matches && running) tapImage(); });
 $('nav-toggle').addEventListener('click', toggleNav);
 
 // ── Evaluate (SSE) ────────────────────────────────────────────────────────
@@ -770,8 +785,10 @@ startBtn.addEventListener('click', () => {
   setStatus('評価開始中...');
 
   const threshold = parseFloat(thrRange.value);
+  // スマホは画像が届くまでに時間がかかるので、低い点数の写真も 0.9 秒は見せてもらう
+  const show = small.matches ? '&show=0.9' : '';
   evtSource = new EventSource(
-    `/api/evaluate?folder=${encodeURIComponent(folder)}&threshold=${threshold}`
+    `/api/evaluate?folder=${encodeURIComponent(folder)}&threshold=${threshold}${show}`
   );
 
   evtSource.onmessage = e => {
@@ -787,7 +804,8 @@ startBtn.addEventListener('click', () => {
       showImage(d.path, d.score,
         above
           ? `閾値以上: ${fname} (${d.score.toFixed(2)})`
-          : `[${d.index}/${d.total}] ${fname} — ${d.score.toFixed(2)}`
+          : `[${d.index}/${d.total}] ${fname} — ${d.score.toFixed(2)}`,
+        !above
       );
     } else if (d.type === 'error') {
       setStatus('エラー: ' + d.message);
@@ -804,12 +822,13 @@ startBtn.addEventListener('click', () => {
 });
 
 // ── Stop ──────────────────────────────────────────────────────────────────
-stopBtn.addEventListener('click', async () => {
-  await fetch('/api/stop', { method: 'POST' });
-  if (evtSource) { evtSource.close(); evtSource = null; }
+async function stopEval(msg) {
+  if (evtSource) { evtSource.close(); evtSource = null; }   // 先に閉じて、止めた後の写真が来ないようにする
   setRunning(false);
-  setStatus('停止しました');
-});
+  await fetch('/api/stop', { method: 'POST' });
+  setStatus(msg || '停止しました');
+}
+stopBtn.addEventListener('click', () => stopEval());
 
 // ── Navigate ──────────────────────────────────────────────────────────────
 async function navigate(dir) {
