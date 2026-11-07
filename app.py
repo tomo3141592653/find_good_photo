@@ -82,28 +82,61 @@ if not Path(state_name).exists():
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
 
-pt_state = torch.load(state_name, map_location=device)
-predictor = AestheticPredictor(768)
-predictor.load_state_dict(pt_state)
-predictor.to(device)
-predictor.eval()
-
-clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
-
-# 朋義さんのモデル: 朋義さんが写真サイトとインスタに出した写真（同じ日の出さなかった写真との比較）と、
-# 「点数の高い写真」ページの ○✕ から学んだ補正 f。点数は LAION + f(x)。
-# 学習は アユムのリポジトリ ayumu-lab/research/biteki-model/train_ratings.py（model.pt をここに写したもの）
+# モデル（CLIP ViT-L/14・LAION の頭・朋義さんの補正）は、使うときだけ GPU に載せる。
+# 前は起動した時点で読み込み、画面を開いていなくても RAM 3GB と GPU を抱えたままだった（2026-11-07）。
+# 画面を開いたら裏で読み込み始め（数秒〜十数秒）、IDLE 秒使われなければ手放す
+IDLE = 15 * 60
 PERSONAL_FILE = Path(__file__).parent / "personal_model.pt"
-personal_head = None
-if PERSONAL_FILE.exists():
-    _pd = torch.load(PERSONAL_FILE, map_location=device)
-    personal_head = nn.Sequential(nn.Dropout(0.2), nn.Linear(768, _pd["hidden"]), nn.GELU(),
-                                  nn.Dropout(0.2), nn.Linear(_pd["hidden"], 1))
-    personal_head.load_state_dict({k[2:]: v for k, v in _pd["state"].items()})   # 学習側は f.1 / f.4 の名前
-    personal_head.to(device).eval()
-    print("personal model: loaded")
+_m = {}
+_m_lock = threading.Lock()
+_m_last = [0.0]
 
-MODELS = ["laion"] + (["personal"] if personal_head is not None else [])
+
+def _models():
+    """(clip_model, clip_preprocess, predictor, personal_head) を返す。まだ読んでいなければ読む"""
+    _m_last[0] = time.time()
+    with _m_lock:
+        if not _m:
+            t0 = time.time()
+            pr = AestheticPredictor(768)
+            pr.load_state_dict(torch.load(state_name, map_location=device))
+            pr.to(device).eval()
+            cm, cp = clip.load("ViT-L/14", device=device)
+            # 朋義さんのモデル: 朋義さんが写真サイトとインスタに出した写真（同じ日の出さなかった写真との比較）と、
+            # 「点数の高い写真」ページの ○✕ から学んだ補正 f。点数は LAION + f(x)。
+            # 学習は アユムのリポジトリ ayumu-lab/research/biteki-model/train_ratings.py（model.pt をここに写したもの）
+            ph = None
+            if PERSONAL_FILE.exists():
+                _pd = torch.load(PERSONAL_FILE, map_location=device)
+                ph = nn.Sequential(nn.Dropout(0.2), nn.Linear(768, _pd["hidden"]), nn.GELU(),
+                                   nn.Dropout(0.2), nn.Linear(_pd["hidden"], 1))
+                ph.load_state_dict({k[2:]: v for k, v in _pd["state"].items()})   # 学習側は f.1 / f.4 の名前
+                ph.to(device).eval()
+            _m.update(clip=cm, prep=cp, pred=pr, personal=ph)
+            print(f"models: loaded {time.time() - t0:.1f}s", flush=True)
+        return _m["clip"], _m["prep"], _m["pred"], _m["personal"]
+
+
+def _unload_when_idle():
+    while True:
+        time.sleep(60)
+        if _m and time.time() - _m_last[0] > IDLE and not ml_lock.locked():
+            with _m_lock:
+                _m.clear()
+            import gc
+            gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            print("models: released", flush=True)
+
+
+def _warm():
+    threading.Thread(target=_models, daemon=True).start()
+
+
+threading.Thread(target=_unload_when_idle, daemon=True).start()
+
+MODELS = ["laion"] + (["personal"] if PERSONAL_FILE.exists() else [])
 current_model = "laion"   # 評価に使っているモデル（画面で選ぶ）
 
 # Serialize all ML inference through a single lock to avoid CUDA contention
@@ -191,6 +224,7 @@ def save_score_cache(folder_path: str):
 
 
 def get_image_features(image):
+    clip_model, clip_preprocess, _, _ = _models()
     img_t = clip_preprocess(image).unsqueeze(0).to(device)
     with torch.no_grad():
         feats = clip_model.encode_image(img_t)
@@ -245,6 +279,7 @@ def get_scores(image: Image.Image) -> dict:
     """CLIP の特徴を1回だけ作って、両方のモデルの点数を出す"""
     with ml_lock:
         x = torch.from_numpy(get_image_features(image)).to(device).float()
+        _, _, predictor, personal_head = _models()
         with torch.no_grad():
             laion = predictor(x).item()
             out = {"laion": laion}
@@ -581,6 +616,7 @@ _static_dir = Path(__file__).parent / "static"
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
+    _warm()   # 画面を開いたら、フォルダを選んでいるあいだにモデルを読み始める
     return (_static_dir / "index.html").read_text(encoding="utf-8")
 
 
