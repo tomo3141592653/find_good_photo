@@ -105,6 +105,12 @@ body {
 
 .tl { color: var(--dim2); font-size: 12px; white-space: nowrap; }
 
+#model-sel {
+  background: var(--s2); color: var(--text); border: 1px solid var(--border2);
+  padding: 5px 6px; font-size: 13px; font-family: inherit; flex-shrink: 0;
+}
+#model-sel[hidden] { display: none; }
+
 #thr-range {
   width: 80px;
   accent-color: var(--accent);
@@ -433,7 +439,9 @@ body.show-nav #nav-toggle { color: var(--text); border-color: var(--dim2); }
   #folder-input { font-size: 16px; }
   #browse-btn { padding: 0 14px; font-size: 16px; }
   .sep { display: none; }
-  #thr-range { flex: 1; width: auto; height: 32px; }
+  #thr-range { flex: 1; width: auto; height: 32px; min-width: 60px; }
+  #model-sel { height: 42px; font-size: 15px; max-width: 9.5em; }
+  .tl { display: none; }   /* 狭いので「閾値」の文字は出さない（数字とつまみで分かる） */
   .btn { padding: 0 16px; height: 42px; font-size: 15px; }
   /* 評価と停止は同じ場所に、いま押せるほうだけ出す */
   #start-btn:disabled, #stop-btn:disabled { display: none; }
@@ -478,6 +486,10 @@ body.show-nav #nav-toggle { color: var(--text); border-color: var(--dim2); }
   </div>
 
   <div class="sep"></div>
+  <select id="model-sel" title="点数を付けるモデル" hidden>
+    <option value="laion">一般のモデル</option>
+    <option value="personal">朋義さんの好み</option>
+  </select>
   <span class="tl">閾値</span>
   <input id="thr-range" type="range" min="4" max="6" step="0.1" value="5.0">
   <span id="thr-val">5.0</span>
@@ -505,7 +517,7 @@ body.show-nav #nav-toggle { color: var(--text); border-color: var(--dim2); }
       <div id="score-num">—</div>
       <div class="score-bar">
         <div id="score-track"><div id="score-fill"></div></div>
-        <div id="score-axis"><span>4.0</span><span>5.0</span><span>6.0</span></div>
+        <div id="score-axis"><span id="ax-lo">4.0</span><span id="ax-mid">5.0</span><span id="ax-hi">6.0</span></div>
       </div>
       <button id="nav-toggle">操作</button>
     </div>
@@ -606,22 +618,56 @@ fetch('/api/default-folder').then(r => r.json()).then(d => {
 
 thrRange.addEventListener('input', () => {
   thrVal.textContent = parseFloat(thrRange.value).toFixed(1);
+  try { localStorage.setItem('thr-' + modelSel.value, thrRange.value); } catch (e) {}
 });
+
+// ── モデル: 一般の美的モデル（LAION）と、朋義さんが出した写真と ○✕ から学んだモデル ──────────
+// 点数の幅がちがうので、閾値の範囲・色の境目・目盛りをモデルごとに持つ（色の境目はおよそ上位10%・25%・50%）
+const MODEL_CONF = {
+  laion:    { min: 4,   max: 6,   def: 5.0, colors: [5.5, 5.0, 4.5], axis: [4, 5, 6] },
+  personal: { min: 2.5, max: 6.5, def: 4.5, colors: [5.1, 4.3, 3.6], axis: [2.5, 4.5, 6.5] },
+};
+const modelSel = $('model-sel');
+const conf = () => MODEL_CONF[modelSel.value] || MODEL_CONF.laion;
+
+function applyModel() {
+  const c = conf();
+  thrRange.min = c.min; thrRange.max = c.max;
+  let v = c.def;
+  try { v = parseFloat(localStorage.getItem('thr-' + modelSel.value)) || c.def; } catch (e) {}
+  thrRange.value = v;
+  thrVal.textContent = parseFloat(thrRange.value).toFixed(1);
+  $('ax-lo').textContent = c.axis[0].toFixed(1);
+  $('ax-mid').textContent = c.axis[1].toFixed(1);
+  $('ax-hi').textContent = c.axis[2].toFixed(1);
+  clearScore();
+}
+modelSel.addEventListener('change', () => {
+  try { localStorage.setItem('model', modelSel.value); } catch (e) {}
+  applyModel();
+});
+fetch('/api/models').then(r => r.json()).then(d => {
+  if (!d.models || !d.models.includes('personal')) return;
+  modelSel.hidden = false;
+  try { const m = localStorage.getItem('model'); if (m && d.models.includes(m)) modelSel.value = m; } catch (e) {}
+  applyModel();
+}).catch(() => {});
 
 // ── Score display ─────────────────────────────────────────────────────────
 function showScore(score) {
   scoreNum.textContent = score.toFixed(2);
 
+  const c = conf();
   let color;
-  if      (score >= 5.5) color = 'var(--green)';
-  else if (score >= 5.0) color = '#8bc34a';
-  else if (score >= 4.5) color = 'var(--amber)';
-  else                   color = 'var(--red)';
+  if      (score >= c.colors[0]) color = 'var(--green)';
+  else if (score >= c.colors[1]) color = '#8bc34a';
+  else if (score >= c.colors[2]) color = 'var(--amber)';
+  else                           color = 'var(--red)';
 
   scoreNum.style.color    = color;
   scoreFill.style.background = color;
 
-  const pct = Math.min(100, Math.max(0, (score - 4.0) / 2.0 * 100));
+  const pct = Math.min(100, Math.max(0, (score - c.axis[0]) / (c.axis[2] - c.axis[0]) * 100));
   scoreFill.style.width = pct + '%';
 }
 
@@ -790,7 +836,7 @@ startBtn.addEventListener('click', () => {
   // スマホは画像が届くまでに時間がかかるので、低い点数の写真も 0.9 秒は見せてもらう
   const show = small.matches ? '&show=0.9' : '';
   evtSource = new EventSource(
-    `/api/evaluate?folder=${encodeURIComponent(folder)}&threshold=${threshold}${show}`
+    `/api/evaluate?folder=${encodeURIComponent(folder)}&threshold=${threshold}${show}&model=${modelSel.value}`
   );
 
   evtSource.onmessage = e => {

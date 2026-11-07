@@ -90,6 +90,22 @@ predictor.eval()
 
 clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
 
+# 朋義さんのモデル: 朋義さんが写真サイトとインスタに出した写真（同じ日の出さなかった写真との比較）と、
+# 「点数の高い写真」ページの ○✕ から学んだ補正 f。点数は LAION + f(x)。
+# 学習は アユムのリポジトリ ayumu-lab/research/biteki-model/train_ratings.py（model.pt をここに写したもの）
+PERSONAL_FILE = Path(__file__).parent / "personal_model.pt"
+personal_head = None
+if PERSONAL_FILE.exists():
+    _pd = torch.load(PERSONAL_FILE, map_location=device)
+    personal_head = nn.Sequential(nn.Dropout(0.2), nn.Linear(768, _pd["hidden"]), nn.GELU(),
+                                  nn.Dropout(0.2), nn.Linear(_pd["hidden"], 1))
+    personal_head.load_state_dict({k[2:]: v for k, v in _pd["state"].items()})   # 学習側は f.1 / f.4 の名前
+    personal_head.to(device).eval()
+    print("personal model: loaded")
+
+MODELS = ["laion"] + (["personal"] if personal_head is not None else [])
+current_model = "laion"   # 評価に使っているモデル（画面で選ぶ）
+
 # Serialize all ML inference through a single lock to avoid CUDA contention
 ml_lock = threading.Lock()
 
@@ -98,7 +114,8 @@ ml_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 is_running = False
-scores_cache: dict[str, float] = {}
+# path -> {"laion": 点数, "personal": 点数}（片方だけのこともある）
+scores_cache: dict[str, dict] = {}
 all_processed_images: list[tuple[str, float]] = []
 history_index = -1
 images_in_folder: list[str] = []
@@ -139,14 +156,18 @@ def load_score_cache(folder_path: str, files: list[str]) -> dict[str, float]:
         data = json.loads(cf.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    if data.get("model") != state_name:
-        return {}
     saved = data.get("scores", {})
     loaded = {}
-    for p in files:
-        entry = saved.get(p)
-        if entry and _file_sig(p) == entry[1:]:
-            loaded[p] = entry[0]
+    if data.get("model") == state_name:   # 前の形: [LAION の点数, mtime, size]
+        for p in files:
+            entry = saved.get(p)
+            if entry and _file_sig(p) == entry[1:]:
+                loaded[p] = {"laion": entry[0]}
+    elif data.get("version") == 2:        # 今の形: [{"laion":..,"personal":..}, mtime, size]
+        for p in files:
+            entry = saved.get(p)
+            if entry and _file_sig(p) == entry[1:]:
+                loaded[p] = dict(entry[0])
     return loaded
 
 
@@ -159,7 +180,7 @@ def save_score_cache(folder_path: str):
     try:
         CACHE_DIR.mkdir(exist_ok=True)
         _cache_file(folder_path).write_text(
-            json.dumps({"model": state_name, "scores": scores}, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"version": 2, "scores": scores}, ensure_ascii=False), encoding="utf-8"
         )
     except Exception as e:
         print(f"Cache save failed: {e}")
@@ -220,11 +241,26 @@ def get_image(image_path: str) -> Image.Image:
     return image
 
 
-def get_score(image: Image.Image) -> float:
+def get_scores(image: Image.Image) -> dict:
+    """CLIP の特徴を1回だけ作って、両方のモデルの点数を出す"""
     with ml_lock:
-        features = get_image_features(image)
-        score = predictor(torch.from_numpy(features).to(device).float())
-    return score.item()
+        x = torch.from_numpy(get_image_features(image)).to(device).float()
+        with torch.no_grad():
+            laion = predictor(x).item()
+            out = {"laion": laion}
+            if personal_head is not None:
+                out["personal"] = laion + personal_head(x).item()
+    return out
+
+
+def score_of(path: str, model: str = None) -> float:
+    """そのモデルの点数。記録に無ければ画像を読んで計算し、記録に足す"""
+    model = model or current_model
+    entry = scores_cache.get(path)
+    if entry is None or model not in entry:
+        entry = {**(entry or {}), **get_scores(get_image(path))}
+        scores_cache[path] = entry
+    return entry[model]
 
 
 def image_to_jpeg_bytes(image: Image.Image, max_side: int = 1920, quality: int = 90) -> bytes:
@@ -296,10 +332,9 @@ def _process_loop(current_images, threshold, folder_path, min_show=MIN_SHOW):
         if not is_running:
             break
         try:
-            score = scores_cache.get(image_path)
-            if score is None:
-                score = get_score(get_image(image_path))
-                scores_cache[image_path] = score
+            known = image_path in scores_cache and current_model in scores_cache[image_path]
+            score = score_of(image_path)
+            if not known:
                 new_count += 1
                 if new_count % 20 == 0:
                     save_score_cache(folder_path)
@@ -330,11 +365,7 @@ def _process_loop(current_images, threshold, folder_path, min_show=MIN_SHOW):
 
 
 def _cached_score(path: str) -> float:
-    if path in scores_cache:
-        return scores_cache[path]
-    score = get_score(get_image(path))
-    scores_cache[path] = score
-    return score
+    return score_of(path)
 
 
 def nav_prev_folder():
@@ -553,6 +584,11 @@ async def index():
     return (_static_dir / "index.html").read_text(encoding="utf-8")
 
 
+@app.get("/api/models")
+async def models():
+    return {"models": MODELS, "current": current_model}
+
+
 @app.get("/api/default-folder")
 async def get_default_folder():
     return {"folder": get_last_folder()}
@@ -621,7 +657,10 @@ async def serve_image(path: str, max: int = 1920, q: int = 90):
 
 
 @app.get("/api/evaluate")
-async def evaluate(request: Request, folder: str = "", threshold: float = 5.0, show: float = None):
+async def evaluate(request: Request, folder: str = "", threshold: float = 5.0, show: float = None, model: str = "laion"):
+    global current_model
+    if model in MODELS:
+        current_model = model
     # show: 閾値に届かない写真を見せる最短の秒数。スマホは画像が届くまでに時間がかかるので長めに頼む
     min_show = None if show is None else min(3.0, builtins.max(0.0, show))
     global is_running

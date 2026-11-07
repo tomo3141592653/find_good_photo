@@ -4,3 +4,5 @@ score_cache/
 last_folder.txt
 server.log
 server.err.log
+# 朋義さんの好みのモデル（アユムの ayumu-lab/research/biteki-model/data/model.pt の写し。公開リポジトリには入れない）
+personal_model.pt
