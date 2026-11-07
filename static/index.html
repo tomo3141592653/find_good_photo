@@ -702,14 +702,16 @@ async function loadDir(path) {
   sheetList.textContent = '';
   let d;
   try {
-    d = await fetch('/api/dirs?path=' + encodeURIComponent(path)).then(r => r.json());
+    const r = await fetch('/api/dirs?path=' + encodeURIComponent(path || ''));
+    d = r.ok ? await r.json() : { error: 'フォルダの一覧を読めませんでした。美的判定を再起動してください', fatal: true };
   } catch (err) {
-    d = { error: '読み込めませんでした' };
+    d = { error: 'フォルダの一覧を読めませんでした', fatal: true };
   }
+  if (!d.error && !Array.isArray(d.dirs)) d = { error: 'フォルダの一覧を読めませんでした', fatal: true };
   if (d.error) {
-    if (path) { loadDir(''); return; }
+    if (path && !d.fatal) { loadDir(''); return; }   // 開けないフォルダならドライブの一覧から
     const e = document.createElement('div'); e.className = 'dir-empty'; e.textContent = d.error;
-    sheetList.appendChild(e); return;
+    sheetList.appendChild(e); sheetUse.disabled = true; return;
   }
   sheetDir = d.path;
   sheetPath.textContent = d.path || 'ドライブ';
