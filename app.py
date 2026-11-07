@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import time
 import platform
 import random
 import shlex
@@ -277,10 +278,14 @@ def process_images(folder_path: str, threshold: float):
         save_score_cache(folder_path)
 
 
+MIN_SHOW = 0.35   # 低い点数の写真を見せる最短の秒数（2026-11-07 朋義さん「もう少し時間かけて」）
+
+
 def _process_loop(current_images, threshold, folder_path):
     global is_running, current_showing_index, history_index
     total = len(current_images)
     new_count = 0
+    last_shown = 0.0
 
     for i, image_path in enumerate(current_images):
         if not is_running:
@@ -298,6 +303,11 @@ def _process_loop(current_images, threshold, folder_path):
             current_showing_index = images_in_folder_index.get(image_path, -1)
             print(f"[{i + 1}/{total}] {os.path.basename(image_path)}: {score:.2f}")
 
+            # 点数を計算済みの写真は一瞬で流れて見えないので、閾値に届かない写真も最低 MIN_SHOW 秒は見せる
+            wait = MIN_SHOW - (time.monotonic() - last_shown)
+            if wait > 0 and score < threshold:
+                time.sleep(wait)
+            last_shown = time.monotonic()
             yield {"type": "update", "path": image_path, "score": score, "index": i + 1, "total": total}
 
             if score >= threshold:
