@@ -414,6 +414,13 @@ body {
 }
 #sheet-use:disabled { opacity: .3; }
 
+#nav-toggle {
+  display: none; margin-left: auto; flex-shrink: 0;
+  background: var(--s2); border: 1px solid var(--border2); color: var(--dim2);
+  padding: 9px 14px; font-size: 13px; font-family: inherit; cursor: pointer;
+}
+body.show-nav #nav-toggle { color: var(--text); border-color: var(--dim2); }
+
 #save-btn.done { background: var(--green); border-color: var(--green); color: #000; }
 
 /* ── スマホ ─────────────────────────────────────────────── */
@@ -442,7 +449,10 @@ body {
   #score-num { font-size: 30px; margin: 0; min-width: 3.2em; }
   .score-bar { flex: 1; }
 
-  .nav-box { display: flex; align-items: center; gap: 10px; }
+  /* 写真を大きく見せるため、前後・履歴のボタンは普段しまっておく（写真をタップか「操作」で出す） */
+  .nav-box { display: none; align-items: center; gap: 10px; }
+  body.show-nav .nav-box { display: flex; }
+  #nav-toggle { display: block; }
   .nav-label { margin: 0; width: 2.6em; flex-shrink: 0; font-size: 13px; }
   .nav-row { flex: 1; }
   .btn-nav { padding: 12px 0; font-size: 15px; }
@@ -497,6 +507,7 @@ body {
         <div id="score-track"><div id="score-fill"></div></div>
         <div id="score-axis"><span>4.0</span><span>5.0</span><span>6.0</span></div>
       </div>
+      <button id="nav-toggle">操作</button>
     </div>
 
     <div class="sbox nav-box">
@@ -739,8 +750,13 @@ sheetUse.addEventListener('click', () => {
     const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy;
     sx = null;
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) navigate(dx < 0 ? 'next_folder' : 'prev_folder');
+    else if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && small.matches) toggleNav();   // タップ
   });
 }
+
+// 前後・履歴のボタンを出し入れする（スマホ）
+function toggleNav() { document.body.classList.toggle('show-nav'); }
+$('nav-toggle').addEventListener('click', toggleNav);
 
 // ── Evaluate (SSE) ────────────────────────────────────────────────────────
 startBtn.addEventListener('click', () => {
